@@ -13,6 +13,7 @@ let _kanbanCurrentBoard = null;
 let _kanbanBoardsList = null;
 let _kanbanBoardMenuOpen = false;
 let _kanbanIsDispatching = false;
+let _kanbanSuppressCardClickUntil = 0;
 // SSE event stream — replaces the 30s polling cadence with a long-lived
 // /api/kanban/events/stream connection. Falls back to polling when the
 // EventSource fails to connect (proxy that strips text/event-stream, etc).
@@ -1264,10 +1265,31 @@ async function quickKanbanCardAction(event, taskId, status){
   return updateKanbanTask(taskId, {status});
 }
 
+function _kanbanSuppressNextCardClick(){
+  _kanbanSuppressCardClickUntil = Date.now() + 700;
+}
+
 function dragKanbanTask(event, taskId){
+  _kanbanSuppressNextCardClick();
   if (!event.dataTransfer) return;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', taskId);
+}
+
+function finishKanbanDrag(event){
+  if (event) _kanbanSuppressNextCardClick();
+}
+
+function openKanbanCard(event, taskId){
+  if (Date.now() < _kanbanSuppressCardClickUntil) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return false;
+  }
+  loadKanbanTask(taskId);
+  return false;
 }
 
 function allowKanbanDrop(event){
@@ -1290,10 +1312,13 @@ function clearKanbanDrop(event){
 }
 
 async function dropKanbanTask(event, status){
+  _kanbanSuppressNextCardClick();
   event.preventDefault();
+  event.stopPropagation();
   clearKanbanDrop(event);
   const taskId = event.dataTransfer ? event.dataTransfer.getData('text/plain') : '';
-  if (taskId && status) await updateKanbanTask(taskId, {status});
+  if (taskId && status) await updateKanbanTask(taskId, {status}, {openDetail: false});
+  _kanbanSuppressNextCardClick();
 }
 
 function _kanbanLaneNames(columns){
@@ -1356,7 +1381,7 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" onclick="loadKanbanTask('${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
     <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
@@ -2269,15 +2294,16 @@ async function submitKanbanTaskModal(){
   }
 }
 
-async function updateKanbanTask(taskId, patch){
+async function updateKanbanTask(taskId, patch, opts){
   if (!taskId || !patch) return;
   try {
+    const openDetail = !opts || opts.openDetail !== false;
     const updated = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery(), {
       method: 'PATCH',
       body: JSON.stringify(patch),
     });
     await loadKanban(true);
-    await loadKanbanTask((updated && updated.task && updated.task.id) || taskId);
+    if (openDetail) await loadKanbanTask((updated && updated.task && updated.task.id) || taskId);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
