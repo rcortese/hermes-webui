@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.113] — 2026-05-22 — Release CK (stage-406 — 1-PR — composer model picker lag fix + hard-refresh recovery)
+
+### Fixed
+
+- **PR #2743** by @franksong2702 — Composer model picker now opens immediately from the existing static option list while the dynamic `/api/models` catalog hydrates in the background, instead of blocking the click on the catalog request. A just-selected session model also survives a hard refresh that interrupts the async `/api/session/update` POST: the selection is staged into `sessionStorage` (keyed by session_id, 10-minute TTL) before the async update flies, and `loadSession()` re-applies the pending pick on next session restore and retries the persistence call. Tests pin the new ordering: visible picker render before `await`, pending-state save before `await api('/api/session/update')`, and pending-state replay before the first `syncTopbar()` projects server metadata.
+
 ## [v0.51.112] — 2026-05-22 — Release CJ (stage-405 — 1-PR — session model authoritative across restore)
 
 ### Fixed
