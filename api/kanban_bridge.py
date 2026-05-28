@@ -709,9 +709,12 @@ def _board_dispatchability(meta):
 
         cfg = load_config() or {}
         k_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
-        owner = _normalise_dispatch_owner(k_cfg.get("dispatch_owner"))
+        owner = _normalise_dispatch_owner(os.getenv("HERMES_KANBAN_DISPATCH_OWNER", k_cfg.get("dispatch_owner")))
         coerce = getattr(kb, "_coerce_dispatch_unowned", None)
-        unowned = coerce(k_cfg.get("dispatch_unowned_boards", True)) if coerce else bool(k_cfg.get("dispatch_unowned_boards", True))
+        raw_unowned = os.getenv("HERMES_KANBAN_DISPATCH_UNOWNED_BOARDS")
+        if raw_unowned is None:
+            raw_unowned = k_cfg.get("dispatch_unowned_boards", True)
+        unowned = coerce(raw_unowned) if coerce else bool(raw_unowned)
     except Exception:
         owner = None
         unowned = True
