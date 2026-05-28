@@ -2740,9 +2740,12 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+    const owner = b.dispatch_owner ? `<span class="kanban-board-owner-badge">${esc(t('kanban_dispatch_owner') || 'Owner')}: ${esc(b.dispatch_owner)}</span>` : `<span class="kanban-board-owner-badge muted">${esc(t('kanban_dispatch_owner_unowned') || 'Unowned')}</span>`;
+    const warning = b.dispatchability_warning ? `<span class="kanban-board-warning" title="${esc(b.dispatchability_warning)}">⚠</span>` : '';
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''} ${b.dispatchable === false ? 'is-not-dispatchable' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
-      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
+      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}${owner}</span>
+      ${warning}
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');
@@ -2847,6 +2850,7 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalDesc').value = '';
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  document.getElementById('kanbanBoardModalOwner').value = '';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -2891,6 +2895,7 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  document.getElementById('kanbanBoardModalOwner').value = meta.dispatch_owner || '';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -2925,6 +2930,7 @@ async function submitKanbanBoardModal(){
   const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const dispatch_owner = (document.getElementById('kanbanBoardModalOwner').value || '').trim();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -2939,7 +2945,7 @@ async function submitKanbanBoardModal(){
     try {
       const res = await api('/api/kanban/boards', {
         method: 'POST',
-        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+        body: JSON.stringify({slug: slugInput, name, description, icon, color, dispatch_owner, switch: true}),
       });
       closeKanbanBoardModal();
       // Switch to the new board and reload
@@ -2963,7 +2969,7 @@ async function submitKanbanBoardModal(){
     try {
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color}),
+        body: JSON.stringify({name, description, icon, color, dispatch_owner}),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon

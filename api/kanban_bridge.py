@@ -691,6 +691,42 @@ def _task_action_payload(task_id: str, body: dict, action: str, *, board=None):
 # /boards surface (plugins/kanban/dashboard/plugin_api.py) so that the
 # CLI / gateway / dashboard / WebUI all share the same active-board pointer.
 
+def _normalise_dispatch_owner(value):
+    kb = _kb()
+    normalizer = getattr(kb, "normalize_dispatch_owner", None)
+    if normalizer:
+        return normalizer(value)
+    text = str(value or "").strip().lower()
+    return text or None
+
+
+def _board_dispatchability(meta):
+    kb = _kb()
+    owner = None
+    unowned = True
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        k_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
+        owner = _normalise_dispatch_owner(k_cfg.get("dispatch_owner"))
+        coerce = getattr(kb, "_coerce_dispatch_unowned", None)
+        unowned = coerce(k_cfg.get("dispatch_unowned_boards", True)) if coerce else bool(k_cfg.get("dispatch_unowned_boards", True))
+    except Exception:
+        owner = None
+        unowned = True
+    helper = getattr(kb, "board_dispatchability", None)
+    if helper:
+        try:
+            return helper(meta, dispatch_owner=owner, dispatch_unowned_boards=unowned)
+        except Exception:
+            pass
+    board_owner = _normalise_dispatch_owner((meta or {}).get("dispatch_owner"))
+    dispatchable = (not owner) or (board_owner == owner) or (unowned and not board_owner)
+    warning = None if dispatchable else f"owned by {board_owner or 'unowned'}; dispatcher owner is {owner}"
+    return {"dispatch_owner": board_owner, "dispatchable": dispatchable, "dispatchability_warning": warning}
+
+
 def _board_meta_dict(meta):
     """Coerce the library's board metadata dict into a JSON-serialisable
     form. ``list_boards`` returns dicts with Path values for ``directory``;
@@ -701,6 +737,12 @@ def _board_meta_dict(meta):
     for key in ("directory", "db_path", "path"):
         if key in out and out[key] is not None:
             out[key] = str(out[key])
+    try:
+        out.update(_board_dispatchability(out))
+    except Exception:
+        out.setdefault("dispatch_owner", None)
+        out.setdefault("dispatchable", True)
+        out.setdefault("dispatchability_warning", None)
     return out
 
 
@@ -790,6 +832,7 @@ def _create_board_payload(body):
             description=body.get("description") or None,
             icon=body.get("icon") or None,
             color=body.get("color") or None,
+            dispatch_owner=body.get("dispatch_owner") or None,
         )
     except (ValueError, AttributeError) as exc:
         raise ValueError(str(exc)) from exc
@@ -825,14 +868,16 @@ def _update_board_payload(slug, body):
     archived = body.get("archived")
     if isinstance(archived, str):
         archived = archived.strip().lower() in {"1", "true", "yes", "on"}
-    meta = kb.write_board_metadata(
-        normed,
-        name=body.get("name"),
-        description=body.get("description"),
-        icon=body.get("icon"),
-        color=body.get("color"),
-        archived=archived if isinstance(archived, bool) else None,
-    )
+    update_kwargs = {
+        "name": body.get("name"),
+        "description": body.get("description"),
+        "icon": body.get("icon"),
+        "color": body.get("color"),
+        "archived": archived if isinstance(archived, bool) else None,
+    }
+    if "dispatch_owner" in body:
+        update_kwargs["dispatch_owner"] = body.get("dispatch_owner") or None
+    meta = kb.write_board_metadata(normed, **update_kwargs)
     return {"board": _board_meta_dict(meta), "read_only": False}
 
 
