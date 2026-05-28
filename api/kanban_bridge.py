@@ -14,6 +14,7 @@ Supported operations:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
