@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.159] — 2026-05-29 — Release EE (stage-batch41 — 5-PR low-risk cleanup: Gateway tool-progress forwarding + shutdown diagnostics + CLI snippet-limit parity + numpad-Enter submit + sync-chat notes guardrail)
+
 ### Changed
 
 - WebUI's durable-notes guardrail now also applies to sync chat and explicitly asks agents to leave external notes and durable memory unchanged unless a turn contains an explicit capture or reusable durable signal; durable note writes should be summarized back to the user.
@@ -12,6 +14,7 @@
 - Gateway-backed browser chat now forwards Hermes Gateway `hermes.tool.progress` SSE events into WebUI's live tool/activity stream, so Gateway runs no longer appear idle while server-side tools are running.
 - WebUI now logs structured shutdown diagnostics when the server exits or `/api/shutdown` is called, including active stream IDs to help diagnose interrupted turns after restarts.
 - The chat composer now treats the numeric keypad Enter key as a submit shortcut even when the send-key preference is set to Ctrl/Cmd+Enter, while preserving regular Enter-as-newline behavior in that mode.
+- The CLI tool-result snippet limit in the browser now matches the backend (`_TOOL_RESULT_SNIPPET_MAX = 4000`), so longer non-diff CLI tool output is no longer truncated to 200 characters before reaching the tool card.
 
 ## [v0.51.158] — 2026-05-29 — Release ED (stage-batch40 — 5-PR low-risk cleanup: numpad/keyboard composer fixes + Joplin search auth + provider-qualified model preservation + SSE fallback poll throttle + assistant-reply polish)
 
