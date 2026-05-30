@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
+
+### Added
+
+- Tool-call output cards now carry a persistent "Tool output" badge and accent rail so tool output stays visually distinct from final assistant responses without requiring hover (#2867).
+- New opt-in "Neon" cyberpunk skin (dark-first, purple/cyan accents). Default-off; select it from the skin list like Catppuccin or Nous.
+
 ## [v0.51.170] — 2026-05-30 — Release EP (stage-batch52 — run-aware SSE replay cursors)
 
 ### Fixed
