@@ -1,0 +1,63 @@
+name: Kanban owner UI regression
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'api/kanban_bridge.py'
+      - 'static/index.html'
+      - 'static/panels.js'
+      - 'static/style.css'
+      - 'static/i18n.js'
+      - 'tests/test_kanban*.py'
+      - '.github/workflows/kanban-owner-ui-regression.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'api/kanban_bridge.py'
+      - 'static/index.html'
+      - 'static/panels.js'
+      - 'static/style.css'
+      - 'static/i18n.js'
+      - 'tests/test_kanban*.py'
+      - '.github/workflows/kanban-owner-ui-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kanban-owner-ui:
+    name: Kanban owner UI / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install focused test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio
+
+      - name: Run Kanban owner/UI regression tests
+        run: |
+          pytest -q \
+            tests/test_kanban_bridge.py \
+            tests/test_kanban_bridge_dispatch_owner.py \
+            tests/test_kanban_owner_patch_semantics.py \
+            tests/test_kanban_owner_ui_behavior.py \
+            tests/test_kanban_ui_static.py \
+            --timeout=60
+
+      - name: Guard against raw missing-i18n keys in board switcher labels
+        run: python tests/ci_guard_kanban_owner_ui.py
