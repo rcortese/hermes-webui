@@ -14,6 +14,7 @@ Supported operations:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
@@ -522,6 +523,50 @@ def _events_payload(parsed):
         return {"events": events, "cursor": cursor, "latest_event_id": cursor, "read_only": False}
 
 
+def _kanban_dispatch_policy_config():
+    kb = _kb()
+    owner = None
+    unowned = True
+    source = "default"
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    k_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
+    raw_owner = os.getenv("HERMES_KANBAN_DISPATCH_OWNER")
+    if raw_owner is not None:
+        source = "env"
+    else:
+        raw_owner = k_cfg.get("dispatch_owner")
+        if raw_owner is not None:
+            source = "config"
+    owner = _normalise_dispatch_owner(raw_owner)
+    coerce = getattr(kb, "_coerce_dispatch_unowned", None)
+    raw_unowned = os.getenv("HERMES_KANBAN_DISPATCH_UNOWNED_BOARDS")
+    if raw_unowned is None:
+        raw_unowned = k_cfg.get("dispatch_unowned_boards", True)
+    else:
+        source = "env"
+    unowned = coerce(raw_unowned) if coerce else bool(raw_unowned)
+    return {"dispatch_owner": owner, "dispatch_unowned_boards": bool(unowned), "dispatch_policy_source": source}
+
+
+def _observed_dispatch_owners(configured_owner=None):
+    owners = set()
+    if configured_owner:
+        owners.add(configured_owner)
+    try:
+        for meta in _kb().list_boards(include_archived=True):
+            owner = _normalise_dispatch_owner((meta or {}).get("dispatch_owner"))
+            if owner:
+                owners.add(owner)
+    except Exception:
+        pass
+    return sorted(owners)
+
+
 def _config_payload(*, board=None):
     kb = _kb()
     try:
@@ -539,6 +584,8 @@ def _config_payload(*, board=None):
     except Exception:
         cfg = {}
     k_cfg = ((cfg.get("dashboard") or {}).get("kanban") or {})
+    policy = _kanban_dispatch_policy_config()
+    known_owners = _observed_dispatch_owners(policy.get("dispatch_owner"))
     return {
         "columns": BOARD_COLUMNS,
         "assignees": assignees,
@@ -546,6 +593,10 @@ def _config_payload(*, board=None):
         "lane_by_profile": bool(k_cfg.get("lane_by_profile", True)),
         "include_archived_by_default": bool(k_cfg.get("include_archived_by_default", False)),
         "render_markdown": bool(k_cfg.get("render_markdown", True)),
+        "dispatch_owner": policy.get("dispatch_owner"),
+        "dispatch_unowned_boards": policy.get("dispatch_unowned_boards"),
+        "dispatch_policy_source": policy.get("dispatch_policy_source"),
+        "known_dispatch_owners": known_owners,
         "read_only": False,
     }
 
@@ -650,6 +701,31 @@ def _dispatch_payload(parsed):
     max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
     if not hasattr(kb, "dispatch_once"):
         raise ValueError("dispatcher is unavailable")
+    try:
+        meta_reader = getattr(kb, "read_board_metadata", None) or getattr(kb, "board_metadata", None)
+        meta = meta_reader(board) if meta_reader else {"slug": board or getattr(kb, "DEFAULT_BOARD", "default")}
+        dispatch_state = _board_dispatchability(meta)
+    except Exception:
+        dispatch_state = {"dispatchable": True, "dispatch_owner": None, "dispatchability_warning": None}
+    if dispatch_state.get("dispatchable") is False:
+        warning = dispatch_state.get("dispatchability_warning") or "board is not dispatchable by this dispatcher"
+        return {
+            "spawned": [],
+            "promoted": 0,
+            "reclaimed": 0,
+            "skipped_unassigned": [],
+            "skipped_nonspawnable": [],
+            "auto_blocked": [],
+            "timed_out": [],
+            "crashed": [],
+            "dry_run": dry_run,
+            "dispatchable": False,
+            "dispatch_owner": dispatch_state.get("dispatch_owner"),
+            "dispatchability_warning": warning,
+            "skipped_dispatch": True,
+            "skipped_dispatch_board": board or getattr(kb, "DEFAULT_BOARD", "default"),
+            "skipped_dispatch_reason": warning,
+        }
     with _conn(board=board) as conn:
         result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
     if isinstance(result, dict):
@@ -691,6 +767,36 @@ def _task_action_payload(task_id: str, body: dict, action: str, *, board=None):
 # /boards surface (plugins/kanban/dashboard/plugin_api.py) so that the
 # CLI / gateway / dashboard / WebUI all share the same active-board pointer.
 
+def _normalise_dispatch_owner(value):
+    kb = _kb()
+    normalizer = getattr(kb, "normalize_dispatch_owner", None)
+    if normalizer:
+        return normalizer(value)
+    text = str(value or "").strip().lower()
+    return text or None
+
+
+def _board_dispatchability(meta):
+    kb = _kb()
+    try:
+        policy = _kanban_dispatch_policy_config()
+        owner = policy.get("dispatch_owner")
+        unowned = bool(policy.get("dispatch_unowned_boards", True))
+    except Exception:
+        owner = None
+        unowned = True
+    helper = getattr(kb, "board_dispatchability", None)
+    if helper:
+        try:
+            return helper(meta, dispatch_owner=owner, dispatch_unowned_boards=unowned)
+        except Exception:
+            pass
+    board_owner = _normalise_dispatch_owner((meta or {}).get("dispatch_owner"))
+    dispatchable = (not owner) or (board_owner == owner) or (unowned and not board_owner)
+    warning = None if dispatchable else f"owned by {board_owner or 'unowned'}; dispatcher owner is {owner}"
+    return {"dispatch_owner": board_owner, "dispatchable": dispatchable, "dispatchability_warning": warning}
+
+
 def _board_meta_dict(meta):
     """Coerce the library's board metadata dict into a JSON-serialisable
     form. ``list_boards`` returns dicts with Path values for ``directory``;
@@ -701,6 +807,12 @@ def _board_meta_dict(meta):
     for key in ("directory", "db_path", "path"):
         if key in out and out[key] is not None:
             out[key] = str(out[key])
+    try:
+        out.update(_board_dispatchability(out))
+    except Exception:
+        out.setdefault("dispatch_owner", None)
+        out.setdefault("dispatchable", True)
+        out.setdefault("dispatchability_warning", None)
     return out
 
 
@@ -767,7 +879,7 @@ def _list_boards_payload(parsed):
         meta["counts"] = _board_counts_for_slug(slug)
         meta["total"] = sum(meta["counts"].values()) if meta["counts"] else 0
         out.append(meta)
-    return {"boards": out, "current": current, "read_only": False}
+    return {"boards": out, "current": current, "known_dispatch_owners": _observed_dispatch_owners(_kanban_dispatch_policy_config().get("dispatch_owner")), "read_only": False}
 
 
 def _create_board_payload(body):
@@ -790,6 +902,7 @@ def _create_board_payload(body):
             description=body.get("description") or None,
             icon=body.get("icon") or None,
             color=body.get("color") or None,
+            dispatch_owner=body.get("dispatch_owner") or None,
         )
     except (ValueError, AttributeError) as exc:
         raise ValueError(str(exc)) from exc
@@ -825,14 +938,16 @@ def _update_board_payload(slug, body):
     archived = body.get("archived")
     if isinstance(archived, str):
         archived = archived.strip().lower() in {"1", "true", "yes", "on"}
-    meta = kb.write_board_metadata(
-        normed,
-        name=body.get("name"),
-        description=body.get("description"),
-        icon=body.get("icon"),
-        color=body.get("color"),
-        archived=archived if isinstance(archived, bool) else None,
-    )
+    update_kwargs = {
+        "name": body.get("name"),
+        "description": body.get("description"),
+        "icon": body.get("icon"),
+        "color": body.get("color"),
+        "archived": archived if isinstance(archived, bool) else None,
+    }
+    if "dispatch_owner" in body:
+        update_kwargs["dispatch_owner"] = body.get("dispatch_owner") or None
+    meta = kb.write_board_metadata(normed, **update_kwargs)
     return {"board": _board_meta_dict(meta), "read_only": False}
 
 

@@ -11,6 +11,8 @@ let _kanbanLanesByProfile = false;
 // persists the last-viewed slug to localStorage so refresh stays put.
 let _kanbanCurrentBoard = null;
 let _kanbanBoardsList = null;
+let _kanbanDispatchConfig = {dispatch_owner: null, dispatch_unowned_boards: true, known_dispatch_owners: []};
+let _kanbanActiveDispatchState = {dispatchable: true, dispatch_owner: null, dispatchability_warning: null};
 let _kanbanBoardMenuOpen = false;
 let _kanbanIsDispatching = false;
 let _kanbanSuppressCardClickUntil = 0;
@@ -463,7 +465,6 @@ function _cronGatewayNoticeHtml(status) {
   return `
     <div class="detail-alert-title">${esc(title)}</div>
     <p>${esc(body)}</p>
-    ${helpLink}
   `;
 }
 
@@ -866,7 +867,6 @@ let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 let _cronProfilesCache=null;
-let _cronDeliveryOptionsCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -914,6 +914,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   const isNoAgent = !!no_agent;
   const toastNotifications = toast_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
+  const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
   body.innerHTML = `
     <div class="main-view-content">
       <form class="detail-form" onsubmit="event.preventDefault(); saveCronForm();">
@@ -934,8 +935,11 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         </div>
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
-          <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+          <select id="cronFormDeliver" ${isEdit ? 'disabled' : ''}>
+            ${deliverOpt('local', t('cron_deliver_local') || 'Local (save output only)')}
+            ${deliverOpt('discord','Discord')}
+            ${deliverOpt('telegram','Telegram')}
+            ${deliverOpt('slack','Slack')}
           </select>
         </div>
         <div class="detail-form-row">
@@ -967,7 +971,6 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
-  _populateCronDeliverOptions(deliver, isEdit);
   _renderCronSkillTags();
   const scheduleEl = $('cronFormSchedule');
   if (scheduleEl) {
@@ -977,37 +980,6 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   }
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
-}
-
-async function _populateCronDeliverOptions(selectedValue, isEdit) {
-  var sel = $('cronFormDeliver');
-  if (!sel) return;
-  sel.disabled = true;
-  try {
-    if (!_cronDeliveryOptionsCache) {
-      var res = await api('/api/crons/delivery-options');
-      _cronDeliveryOptionsCache = res && res.platforms ? res.platforms : [];
-    }
-    sel.innerHTML = '';
-    for (var i = 0; i < _cronDeliveryOptionsCache.length; i++) {
-      var p = _cronDeliveryOptionsCache[i];
-      var opt = document.createElement('option');
-      opt.value = p.value;
-      opt.textContent = p.label;
-      if (p.value === selectedValue) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
-  } catch (e) {
-    sel.innerHTML = '<option value="local">Local (save output only)</option>';
-  }
-  sel.disabled = false;
 }
 
 function _renderCronSkillTags(){
@@ -1093,7 +1065,6 @@ async function saveCronForm(){
       const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
-      if (deliver) updates.deliver = deliver;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
       _editingCronId = null;
@@ -1164,7 +1135,7 @@ function _startCronWatch(jobId) {
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
     try {
-      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
+      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`);
       if (!data.running) {
         _stopCronWatch();
         if (_currentCronDetail && _currentCronDetail.id === jobId) {
@@ -1219,7 +1190,7 @@ function _formatElapsed(seconds) {
 
 function _checkCronWatchOnDetail(jobId) {
   // When opening a detail view, check if job is running
-  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false}).then(data => {
+  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`).then(data => {
     if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
       _startCronWatch(jobId);
     }
@@ -1278,7 +1249,13 @@ function _kanbanCurrentFilters(){
 }
 
 function _kanbanApplyConfigDefaults(config){
-  if (!config || _kanbanConfigApplied) return;
+  if (!config) return;
+  _kanbanDispatchConfig = {
+    dispatch_owner: config.dispatch_owner || null,
+    dispatch_unowned_boards: config.dispatch_unowned_boards !== false,
+    known_dispatch_owners: Array.isArray(config.known_dispatch_owners) ? config.known_dispatch_owners : [],
+  };
+  if (_kanbanConfigApplied) return;
   if ($('kanbanTenantFilter') && config.default_tenant) $('kanbanTenantFilter').dataset.defaultValue = config.default_tenant;
   if ($('kanbanIncludeArchived') && config.include_archived_by_default === true) $('kanbanIncludeArchived').checked = true;
   if (config.lane_by_profile === true) _kanbanLanesByProfile = true;
@@ -1905,7 +1882,7 @@ async function nudgeKanbanDispatcher(){
       dispatchEndpoint + '?dry_run=1&max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
       {method: 'POST'},
     );
-    showToast(_kanbanFormatDispatchResult(result, true), 'info', 6000);
+    showToast(_kanbanFormatDispatchResult(result, true), 6000, 'info');
     await loadKanban(true);
   } catch(e) {
     showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
@@ -1930,6 +1907,11 @@ async function runKanbanDispatcher(){
   _kanbanIsDispatching = true;
   _setKanbanDispatcherButtonsDisabled(true);
   try {
+    const activeDispatch = _kanbanActiveBoardDispatchability();
+    if (activeDispatch.dispatchable === false) {
+      showToast(activeDispatch.dispatchability_warning || (t('kanban_dispatch_not_dispatchable') || 'This board is not dispatchable by this dispatcher'), 8000, 'warning');
+      return;
+    }
     const ok = await showConfirmDialog({
       title: t('kanban_run_dispatcher') || 'Run dispatcher',
       message: t('kanban_run_dispatcher_confirm')
@@ -1942,7 +1924,7 @@ async function runKanbanDispatcher(){
       dispatchEndpoint + '?max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
       {method: 'POST'},
     );
-    showToast(_kanbanFormatDispatchResult(result, false), 'info', 8000);
+    showToast(_kanbanFormatDispatchResult(result, false), 8000, 'info');
     await loadKanban(true);
   } catch(e) {
     showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
@@ -1973,6 +1955,10 @@ function _kanbanFormatDispatchResult(result, dryRun){
   const crashed = (r.crashed || []).length;
   const verb = dryRun ? (t('kanban_dispatch_preview_prefix') || 'Preview:') : (t('kanban_dispatch_run_prefix') || 'Dispatched:');
   const parts = [];
+  const warning = r.dispatchability_warning || (r.skipped_dispatch && (r.skipped_dispatch.reason || r.skipped_dispatch.warning || r.skipped_dispatch));
+  if (r.dispatchable === false || r.skipped_dispatch || warning) {
+    parts.push((t('kanban_dispatch_skipped_dispatch') || 'dispatch skipped') + (warning ? ': ' + String(warning) : ''));
+  }
   parts.push(spawned + ' ' + (t('kanban_dispatch_spawned') || 'spawned'));
   if (promoted) parts.push(promoted + ' ' + (t('kanban_dispatch_promoted') || 'promoted'));
   if (reclaimed) parts.push(reclaimed + ' ' + (t('kanban_dispatch_reclaimed') || 'reclaimed'));
@@ -2787,6 +2773,9 @@ async function loadKanbanBoards(){
   const boards = (data && data.boards) || [];
   const serverCurrent = (data && data.current) || 'default';
   _kanbanBoardsList = boards;
+  if (data && Array.isArray(data.known_dispatch_owners)) {
+    _kanbanDispatchConfig.known_dispatch_owners = data.known_dispatch_owners;
+  }
   // Resolution chain for the active board:
   //   localStorage hint → server's `current` → 'default'.
   // The localStorage hint is honoured ONLY if it points at a board that
@@ -2799,6 +2788,15 @@ async function loadKanbanBoards(){
     _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
+  // Update the active board dispatch state before deciding whether the switcher
+  // itself is worth showing; single-board/default setups still need run/preview
+  // controls to know whether dispatch is allowed.
+  const activeMeta = boards.find(b => b.slug === active) || {slug: active, name: active, icon: '', color: ''};
+  _kanbanActiveDispatchState = {
+    dispatchable: activeMeta.dispatchable !== false,
+    dispatch_owner: activeMeta.dispatch_owner || null,
+    dispatchability_warning: activeMeta.dispatchability_warning || null,
+  };
   // The switcher is visible whenever ≥1 non-default board exists OR the
   // current board is non-default. (If you only have 'default', a switcher
   // adds clutter without value.)
@@ -2806,7 +2804,6 @@ async function loadKanbanBoards(){
   switcher.hidden = !hasMultiple;
   if (!hasMultiple) return;
   // Update the toggle label/icon
-  const activeMeta = boards.find(b => b.slug === active) || {slug: active, name: active, icon: '', color: ''};
   const nameEl = document.getElementById('kanbanBoardSwitcherName');
   const iconEl = document.getElementById('kanbanBoardSwitcherIcon');
   if (nameEl) nameEl.textContent = activeMeta.name || activeMeta.slug || 'Default';
@@ -2842,9 +2839,15 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+    const owner = b.dispatch_owner ? `<span class="kanban-board-owner-badge">${esc(t('kanban_dispatch_owner') || 'Owner')}: ${esc(b.dispatch_owner)}</span>` : `<span class="kanban-board-owner-badge muted">${esc(t('kanban_dispatch_owner_unowned') || 'Unowned')}</span>`;
+    const dispatchBadge = b.dispatchable === false
+      ? `<span class="kanban-board-dispatch-badge warning">${esc(t('kanban_dispatch_not_dispatchable') || 'Not dispatchable')}</span>`
+      : `<span class="kanban-board-dispatch-badge ok">${esc(t('kanban_dispatch_dispatchable') || 'Dispatchable')}</span>`;
+    const warning = b.dispatchability_warning ? `<span class="kanban-board-warning" title="${esc(b.dispatchability_warning)}">⚠ ${esc(b.dispatchability_warning)}</span>` : '';
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''} ${b.dispatchable === false ? 'is-not-dispatchable' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
-      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
+      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}${owner}${dispatchBadge}</span>
+      ${warning}
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');
@@ -2936,6 +2939,76 @@ async function switchKanbanBoard(slug){
 
 // ── Create / rename / archive board modals ──────────────────────────────────
 
+function _kanbanKnownDispatchOwners(currentOwner){
+  const owners = new Set();
+  const add = (value) => {
+    const text = String(value || '').trim();
+    if (text) owners.add(text);
+  };
+  add(currentOwner);
+  add(_kanbanDispatchConfig && _kanbanDispatchConfig.dispatch_owner);
+  ((_kanbanDispatchConfig && _kanbanDispatchConfig.known_dispatch_owners) || []).forEach(add);
+  (_kanbanBoardsList || []).forEach(b => add(b && b.dispatch_owner));
+  return Array.from(owners).sort((a, b) => a.localeCompare(b));
+}
+
+function _kanbanSetBoardOwnerValue(value){
+  const select = document.getElementById('kanbanBoardModalOwner');
+  const custom = document.getElementById('kanbanBoardModalOwnerCustom');
+  if (!select) return;
+  const owner = String(value || '').trim();
+  _kanbanPopulateBoardOwnerControl(owner);
+  if (!owner) {
+    select.value = '';
+    if (custom) { custom.value = ''; custom.hidden = true; }
+  } else if (Array.from(select.options).some(opt => opt.value === owner)) {
+    select.value = owner;
+    if (custom) { custom.value = ''; custom.hidden = true; }
+  } else {
+    select.value = '__custom__';
+    if (custom) { custom.value = owner; custom.hidden = false; }
+  }
+}
+
+function _kanbanPopulateBoardOwnerControl(currentOwner){
+  const select = document.getElementById('kanbanBoardModalOwner');
+  const custom = document.getElementById('kanbanBoardModalOwnerCustom');
+  if (!select) return;
+  const selected = String(currentOwner !== undefined ? currentOwner : select.value || '').trim();
+  const owners = _kanbanKnownDispatchOwners(selected);
+  const unownedLabel = t('kanban_dispatch_owner_unowned') || 'Unowned / clear';
+  const customLabel = t('kanban_dispatch_owner_custom') || 'Custom owner…';
+  select.innerHTML = `<option value="">${esc(unownedLabel)}</option>`
+    + owners.map(owner => `<option value="${esc(owner)}">${esc(owner)}</option>`).join('')
+    + `<option value="__custom__">${esc(customLabel)}</option>`;
+  if (!select._kanbanOwnerChangeWired) {
+    select.addEventListener('change', () => {
+      if (custom) {
+        custom.hidden = select.value !== '__custom__';
+        if (select.value !== '__custom__') custom.value = '';
+        else custom.focus();
+      }
+    });
+    select._kanbanOwnerChangeWired = true;
+  }
+  if (selected && owners.includes(selected)) select.value = selected;
+  else if (selected) select.value = '__custom__';
+  else select.value = '';
+  if (custom) custom.hidden = select.value !== '__custom__';
+}
+
+function _kanbanBoardModalDispatchOwnerValue(){
+  const select = document.getElementById('kanbanBoardModalOwner');
+  const custom = document.getElementById('kanbanBoardModalOwnerCustom');
+  if (!select) return '';
+  if (select.value === '__custom__') return (custom && custom.value ? custom.value : '').trim();
+  return (select.value || '').trim();
+}
+
+function _kanbanActiveBoardDispatchability(){
+  return _kanbanActiveDispatchState || {dispatchable: true, dispatch_owner: null, dispatchability_warning: null};
+}
+
 function openKanbanCreateBoard(){
   const modal = document.getElementById('kanbanBoardModal');
   if (!modal) return;
@@ -2949,6 +3022,7 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalDesc').value = '';
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  _kanbanSetBoardOwnerValue('');
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -2993,6 +3067,7 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  _kanbanSetBoardOwnerValue(meta.dispatch_owner || '');
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -3027,6 +3102,7 @@ async function submitKanbanBoardModal(){
   const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const dispatch_owner = _kanbanBoardModalDispatchOwnerValue();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -3041,7 +3117,7 @@ async function submitKanbanBoardModal(){
     try {
       const res = await api('/api/kanban/boards', {
         method: 'POST',
-        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+        body: JSON.stringify({slug: slugInput, name, description, icon, color, dispatch_owner, switch: true}),
       });
       closeKanbanBoardModal();
       // Switch to the new board and reload
@@ -3065,7 +3141,7 @@ async function submitKanbanBoardModal(){
     try {
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color}),
+        body: JSON.stringify({name, description, icon, color, dispatch_owner}),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon
@@ -3270,12 +3346,11 @@ async function loadInsights(animate) {
   }
   const period = ($('insightsPeriod') || {}).value || '30';
   try {
-    const [data, wikiStatus, skillUsage] = await Promise.all([
+    const [data, wikiStatus] = await Promise.all([
       api(`/api/insights?days=${period}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
-      api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
-    _renderInsights(data, box, wikiStatus, skillUsage);
+    _renderInsights(data, box, wikiStatus);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
@@ -3428,26 +3503,7 @@ function _bucketDailyTokensForChart(rows) {
   return result;
 }
 
-function _renderSkillUsage(d) {
-  const usage = d.usage || {};
-  const skillNames = d.skill_names || [];
-  const totalInvocations = d.total_invocations || 0;
-  const uniqueUsed = d.unique_skills_used || 0;
-  const entries = Object.entries(usage)
-    .map(([name, meta]) => [name, Number(meta && meta.use_count) || 0, Number(meta && meta.view_count) || 0, Number(meta && meta.patch_count) || 0])
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-  if (!entries.length) {
-    return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="insights-empty">${esc(t('insights_skill_usage_no_data'))}</div><div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(t('insights_skill_usage_no_data_hint'))}</div></div>`;
-  }
-  const rows = entries.map(([name, useCount, viewCount, patchCount]) => {
-    const share = totalInvocations > 0 ? (useCount / totalInvocations * 100).toFixed(1) : '0.0';
-    return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(name)}">${esc(name)}</span><span>${useCount}</span><span>${viewCount}</span><span>${patchCount}</span><span>${share}%</span></div>`;
-  }).join('');
-  return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="skill-usage-grid" style="margin-bottom:8px"><div><span>${esc(t('insights_skill_usage_total'))}</span><strong>${totalInvocations.toLocaleString()}</strong></div><div><span>${esc(t('insights_skill_usage_skills_used'))}</span><strong>${uniqueUsed}/${skillNames.length}</strong></div></div><div class="insights-table skill-usage-table"><div class="insights-table-head"><span>${esc(t('insights_skill_usage_col_skill'))}</span><span>${esc(t('insights_skill_usage_col_uses'))}</span><span>${esc(t('insights_skill_usage_col_views'))}</span><span>${esc(t('insights_skill_usage_col_patches'))}</span><span>${esc(t('insights_skill_usage_col_share'))}</span></div>${rows}</div><div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_skill_usage_footer'))}</div></div>`;
-}
-
-function _renderInsights(d, box, wikiStatus, skillUsage) {
+function _renderInsights(d, box, wikiStatus) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
     const value = Number(c || 0);
@@ -3551,7 +3607,6 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   box.innerHTML = `
     ${_renderSystemHealthPanel()}
     ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
@@ -7215,19 +7270,7 @@ async function _removeProviderKey(providerId){
       if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
     }
   }catch(e){
-    // A 403 from /api/providers/delete fires when the CSRF cookie/header
-    // pair has drifted. The server distinguishes three reasons in
-    // api/routes.py:_csrf_rejection_error ("Session expired - reload the
-    // page", "Cross-origin mismatch - check reverse proxy headers", and
-    // the fallback "Cross-origin request rejected"); api()'s catch lifts
-    // that string onto e.message. Pass it through verbatim so the
-    // deployment-shape failure #2572 calls out keeps its actionable hint
-    // instead of being flattened to a single generic toast.
-    if(e&&e.status===403){
-      showToast(e.message||'Session expired. Reload the page and try again.',6000,'error');
-    }else{
-      showToast('Error: '+e.message);
-    }
+    showToast('Error: '+e.message);
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
   }
 }

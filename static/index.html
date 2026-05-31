@@ -1472,6 +1472,14 @@
         <input type="color" id="kanbanBoardModalColor" value="#7aa2ff">
       </div>
     </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalOwner" data-i18n="kanban_dispatch_owner">Dispatch owner</label>
+      <select id="kanbanBoardModalOwner">
+        <option value="" data-i18n="kanban_dispatch_owner_unowned">Unowned / clear</option>
+        <option value="__custom__" data-i18n="kanban_dispatch_owner_custom">Custom owner…</option>
+      </select>
+      <input type="text" id="kanbanBoardModalOwnerCustom" maxlength="64" placeholder="moss" autocomplete="off" hidden>
+    </div>
     <div class="kanban-modal-error" id="kanbanBoardModalError" aria-live="polite"></div>
     <div class="kanban-modal-actions">
       <button type="button" class="btn secondary" onclick="closeKanbanBoardModal()" data-i18n="cancel">Cancel</button>

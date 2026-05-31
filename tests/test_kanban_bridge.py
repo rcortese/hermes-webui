@@ -295,7 +295,7 @@ class FakeKanbanDB:
             out.append(dict(meta))
         return out
 
-    def create_board(self, slug, *, name=None, description=None, icon=None, color=None):
+    def create_board(self, slug, *, name=None, description=None, icon=None, color=None, dispatch_owner=None):
         boards = getattr(self, "boards", None)
         if boards is None:
             self.boards = {"default": {"slug": "default", "name": "Default board", "archived": False}}
@@ -312,11 +312,12 @@ class FakeKanbanDB:
             "icon": icon or "",
             "color": color or "",
             "archived": False,
+            "dispatch_owner": dispatch_owner,
         }
         boards[normed] = meta
         return dict(meta)
 
-    def write_board_metadata(self, slug, *, name=None, description=None, icon=None, color=None, archived=None):
+    def write_board_metadata(self, slug, *, name=None, description=None, icon=None, color=None, archived=None, dispatch_owner=None):
         boards = getattr(self, "boards", None) or {}
         if slug not in boards:
             raise LookupError(f"board {slug!r} does not exist")
@@ -326,6 +327,7 @@ class FakeKanbanDB:
         if icon is not None: meta["icon"] = icon
         if color is not None: meta["color"] = color
         if archived is not None: meta["archived"] = bool(archived)
+        if dispatch_owner is not None: meta["dispatch_owner"] = dispatch_owner
         boards[slug] = meta
         return dict(meta)
 
@@ -356,8 +358,51 @@ class FakeKanbanDB:
         boards = getattr(self, "boards", None) or {}
         return dict(boards.get(slug, {"slug": slug, "name": slug, "archived": False}))
 
+    def normalize_dispatch_owner(self, owner):
+        text = str(owner or "").strip().lower()
+        return text or None
+
+    def _coerce_dispatch_unowned(self, value):
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
+
+    def board_dispatchability(self, meta, *, dispatch_owner=None, dispatch_unowned_boards=True):
+        configured = self.normalize_dispatch_owner(dispatch_owner)
+        board_owner = self.normalize_dispatch_owner((meta or {}).get("dispatch_owner"))
+        unowned = self._coerce_dispatch_unowned(dispatch_unowned_boards)
+        if configured and board_owner and board_owner != configured:
+            return {"dispatch_owner": board_owner, "dispatchable": False, "dispatchability_warning": f"owned by {board_owner}; dispatcher owner is {configured}"}
+        if configured and not board_owner and not unowned:
+            return {"dispatch_owner": None, "dispatchable": False, "dispatchability_warning": f"unowned board skipped by dispatcher owner {configured}"}
+        return {"dispatch_owner": board_owner, "dispatchable": True, "dispatchability_warning": None}
+
+    def dispatch_refusal_payload(self, meta, *, dispatch_owner=None, dispatch_unowned_boards=True, dry_run=False):
+        info = self.board_dispatchability(meta, dispatch_owner=dispatch_owner, dispatch_unowned_boards=dispatch_unowned_boards)
+        if info["dispatchable"]:
+            return None
+        return {
+            "reclaimed": 0,
+            "crashed": [],
+            "timed_out": [],
+            "auto_blocked": [],
+            "promoted": 0,
+            "spawned": [],
+            "skipped_unassigned": [],
+            "skipped_nonspawnable": [],
+            "dispatchable": False,
+            "dispatch_owner": info["dispatch_owner"],
+            "dispatchability_warning": info["dispatchability_warning"],
+            "skipped_dispatch": True,
+            "dry_run": bool(dry_run),
+        }
+
 
 def _load_bridge(monkeypatch):
+    # Keep bridge unit tests independent from the operator's real Hermes
+    # kanban.dispatch_owner config unless a test explicitly sets env policy.
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_OWNER", "")
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_UNOWNED_BOARDS", "true")
     fake_kanban = FakeKanbanDB()
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.kanban_db = fake_kanban
@@ -403,6 +448,53 @@ def test_board_pointer_drift_falls_back_to_default(monkeypatch):
     assert data["current"] == "default"
     assert fake_kanban.get_current_board() == "default"
     assert any(board["slug"] == "default" and board["is_current"] for board in data["boards"])
+
+
+def test_dispatch_payload_refuses_other_owned_board_without_calling_dispatch(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    fake_kanban.boards = {
+        "default": {"slug": "default", "name": "Default board", "archived": False},
+        "jen-board": {"slug": "jen-board", "name": "Jen board", "archived": False, "dispatch_owner": "jen"},
+    }
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_OWNER", "moss")
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_UNOWNED_BOARDS", "false")
+    called = False
+
+    def fail_dispatch(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("dispatch_once must not run for non-dispatchable boards")
+
+    fake_kanban.dispatch_once = fail_dispatch
+
+    data = bridge._dispatch_payload(_parsed(path="/api/kanban/dispatch", query="board=jen-board&dry_run=true"))
+
+    assert called is False
+    assert data["dispatchable"] is False
+    assert data["dispatch_owner"] == "jen"
+    assert data["skipped_dispatch"] is True
+    assert data["dry_run"] is True
+    assert data["spawned"] == []
+    assert "dispatcher owner is moss" in data["dispatchability_warning"]
+
+
+def test_dispatch_payload_refuses_unowned_board_under_strict_owner_policy(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    fake_kanban.boards = {
+        "default": {"slug": "default", "name": "Default board", "archived": False},
+        "unowned": {"slug": "unowned", "name": "Unowned", "archived": False, "dispatch_owner": None},
+    }
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_OWNER", "moss")
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_UNOWNED_BOARDS", "false")
+
+    data = bridge._dispatch_payload(_parsed(path="/api/kanban/dispatch", query="board=unowned"))
+
+    assert data["dispatchable"] is False
+    assert data["dispatch_owner"] is None
+    assert data["skipped_dispatch"] is True
+    assert "unowned board skipped" in data["dispatchability_warning"]
 
 
 def test_kanban_task_detail_payload_exposes_comments_events_links_and_runs(monkeypatch):
