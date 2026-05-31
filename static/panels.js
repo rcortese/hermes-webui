@@ -2830,6 +2830,23 @@ function _kanbanSafeColor(c){
   return '';
 }
 
+function _kanbanLabel(key, fallback){
+  const val = t(key);
+  return val && val !== key ? val : fallback;
+}
+
+function _kanbanOwnerBadge(owner){
+  if (!owner) return `<span class="kanban-board-owner-badge muted">${esc(_kanbanLabel('kanban_dispatch_owner_unowned', 'Unowned'))}</span>`;
+  return `<span class="kanban-board-owner-badge">${esc(_kanbanLabel('kanban_dispatch_owner_short', 'Owner'))}: ${esc(owner)}</span>`;
+}
+
+function _kanbanDispatchBadge(board){
+  if (board.dispatchable === false) {
+    return `<span class="kanban-board-dispatch-badge warning" title="${esc(board.dispatchability_warning || '')}">${esc(_kanbanLabel('kanban_dispatch_not_dispatchable_short', 'Blocked'))}</span>`;
+  }
+  return `<span class="kanban-board-dispatch-badge ok">${esc(_kanbanLabel('kanban_dispatch_dispatchable_short', 'Runnable'))}</span>`;
+}
+
 function _renderKanbanBoardMenu(boards, current){
   const menu = document.getElementById('kanbanBoardSwitcherMenu');
   if (!menu) return;
@@ -2839,15 +2856,16 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    const owner = b.dispatch_owner ? `<span class="kanban-board-owner-badge">${esc(t('kanban_dispatch_owner') || 'Owner')}: ${esc(b.dispatch_owner)}</span>` : `<span class="kanban-board-owner-badge muted">${esc(t('kanban_dispatch_owner_unowned') || 'Unowned')}</span>`;
-    const dispatchBadge = b.dispatchable === false
-      ? `<span class="kanban-board-dispatch-badge warning">${esc(t('kanban_dispatch_not_dispatchable') || 'Not dispatchable')}</span>`
-      : `<span class="kanban-board-dispatch-badge ok">${esc(t('kanban_dispatch_dispatchable') || 'Dispatchable')}</span>`;
+    const owner = _kanbanOwnerBadge(b.dispatch_owner);
+    const dispatchBadge = _kanbanDispatchBadge(b);
     const warning = b.dispatchability_warning ? `<span class="kanban-board-warning" title="${esc(b.dispatchability_warning)}">⚠ ${esc(b.dispatchability_warning)}</span>` : '';
     return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''} ${b.dispatchable === false ? 'is-not-dispatchable' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
-      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}${owner}${dispatchBadge}</span>
-      ${warning}
+      <span class="kanban-board-switcher-item-body">
+        <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
+        <span class="kanban-board-switcher-item-meta">${owner}${dispatchBadge}</span>
+        ${warning}
+      </span>
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');
