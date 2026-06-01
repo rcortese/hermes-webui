@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.202] — 2026-06-01 — Release FV (stage-batch14 — filter interrupted-recovery control text from visible transcript)
+
+### Fixed
+- Interrupted SSE-recovery control text (the synthetic `stale_interrupted_event` run-journal payload) is now kept out of the visible chat transcript instead of being replayed as a message: it's marked `recovery_control` on the backend and filtered across the `msgContent()` render path, the SSE settle/error handlers, and final transcript filtering, so platform-only control state no longer leaks into the conversation (#3321, @franksong2702).
+
 ## [v0.51.201] — 2026-06-01 — Release FU (stage-batch13 — colored diff lines in tool-card snippets)
 
 ### Added

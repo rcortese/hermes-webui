@@ -5428,6 +5428,29 @@ function msgContent(m){
   return String(c).trim();
 }
 
+function _isRecoveryControlMessageText(text){
+  const normalized=String(text||'').replace(/\s+/g,' ').trim();
+  if(!normalized) return false;
+  const systemRecovery=/^\[System:/i.test(normalized)
+    && /previous response was cut off by a network error/i.test(normalized)
+    && /continue exactly where you left off/i.test(normalized);
+  const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+  return !!(systemRecovery || backendRecovery);
+}
+function _isRecoveryControlMessage(m){
+  if(!m||m.role==='tool') return false;
+  if(m.recovery_control===true) return true;
+  // Backward-compat ONLY: strict fully-anchored text match for pre-marker
+  // persisted sessions. NOT provider_details_label — a real "Response
+  // interrupted" card carries 'Interruption details' and must stay visible.
+  return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
+}
+function _assistantMessageHasVisibleContent(m){
+  if(!m||m.role!=='assistant') return false;
+  if(_isRecoveryControlMessage(m)) return false;
+  return !!msgContent(m);
+}
+
 function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
@@ -6380,10 +6403,12 @@ function renderMessages(options){
     if(!m||!m.role||m.role==='tool')return false;
     if(_isContextCompactionMessage(m)) return false;
     if(_isPreservedCompressionTaskListMessage(m)) return false;
+    if(_isRecoveryControlMessage(m)) return false;
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+      if(_assistantMessageHasVisibleContent(m)) return true;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
@@ -6410,9 +6435,10 @@ function renderMessages(options){
     for(const m of S.messages){
       if(!m||!m.role||m.role==='tool'){ri++;continue;}
       if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
+      if(_isRecoveryControlMessage(m)){ri++;continue;}
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) rebuilt.push({m,rawIdx:ri});
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
       ri++;
     }
     _visWithIdxCache=rebuilt;
