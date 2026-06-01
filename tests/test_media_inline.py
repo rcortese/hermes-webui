@@ -26,6 +26,7 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
@@ -58,6 +59,17 @@ class TestMediaRenderMdStash(unittest.TestCase):
     def test_media_restore_produces_download_link(self):
         self.assertIn("msg-media-link", UI_JS,
                       "restore pass must produce download link for non-image files")
+
+    def test_local_image_media_uses_artifact_card(self):
+        self.assertIn("localArtifactCard", UI_JS)
+        self.assertIn("msg-artifact-card msg-artifact-card--image", UI_JS)
+        self.assertIn("msg-artifact-actions", UI_JS)
+        self.assertIn("t('media_download')", UI_JS)
+        self.assertIn("t('media_open')", UI_JS)
+        self.assertIn("media_open:", I18N_JS)
+        self.assertIn("media_download:", I18N_JS)
+        self.assertNotIn("downloadUrl=src+(String(src).includes('?')?'&':'?')+'download=1'", UI_JS)
+        self.assertNotIn("openUrl=src+(String(src).includes('?')?'&':'?')+'inline=1'", UI_JS)
 
     def test_media_api_url_pattern(self):
         self.assertIn("api/media?path=", UI_JS,
@@ -125,8 +137,21 @@ class TestMediaCSS(unittest.TestCase):
                       "Full-size toggle class must exist for zoom-on-click")
 
     def test_msg_media_link_class_defined(self):
-        self.assertIn(".msg-media-link", self.CSS,
-                      "Download link style must be defined for non-image media")
+        self.assertIn(
+            ".msg-media-link",
+            self.CSS,
+            "Download link style must be defined for non-image media",
+        )
+
+    def test_generated_artifact_card_css_defined(self):
+        for cls in [
+            ".msg-artifact-card",
+            ".msg-artifact-meta",
+            ".msg-artifact-title",
+            ".msg-artifact-actions",
+            ".msg-artifact-action",
+        ]:
+            self.assertIn(cls, self.CSS)
 
 
 
