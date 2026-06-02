@@ -1250,14 +1250,29 @@ _PROVIDER_MODELS = {
 
 _AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
 
+# Environment variable sources that are auto-detected and should be filtered
+# when the token is a classic PAT (ghp_*) that Copilot API doesn't support.
+# Note: COPILOT_GITHUB_TOKEN is NOT included here - it's user-specific config.
+_AMBIENT_GH_ENV_SOURCES = frozenset({"env:github_token", "env:gh_token"})
+
 
 def _is_ambient_gh_cli_entry(source: str, label: str, key_source: str) -> bool:
     """True when a credential-pool entry is a seeded gh-cli token rather than
     one the user added explicitly. Filter these so Copilot doesn't appear in
     the dropdown just because `gh` is installed on the system.
+
+    Also filters GITHUB_TOKEN and GH_TOKEN env var entries, which are
+    auto-detected from the environment and should not cause Copilot to appear
+    in the picker when the token is a classic PAT (ghp_*) that Copilot API
+    doesn't support.
+
+    Note: COPILOT_GITHUB_TOKEN is NOT filtered - it's user-specific config
+    that should always be respected.
     """
+    source_lower = source.strip().lower()
     return (
-        source.strip().lower() in _AMBIENT_GH_CLI_MARKERS
+        source_lower in _AMBIENT_GH_CLI_MARKERS
+        or source_lower in _AMBIENT_GH_ENV_SOURCES
         or label.strip().lower() == "gh auth token"
         or key_source.strip().lower() == "gh auth token"
     )
@@ -2136,15 +2151,44 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
 
     if "thinking" in token_set or "reasoning" in token_set:
         return True
+    if "gpt" in token_set or normalized.startswith("gpt"):
+        # Restrict to GPT-5+ (exclude GPT-4o/4.1/3.5 — reasoning_effort unsupported)
+        m = re.search(r"gpt-(\d+)", normalized)
+        if m and int(m.group(1)) >= 5:
+            return True
+        return False
     if normalized in {"o1", "o3", "o4"} or normalized.startswith(("o1-", "o3-", "o4-")):
         return True
-    if normalized.startswith(("kimi-k2", "kimi-thinking", "claude-3", "claude-4")):
+    if "claude" in token_set or normalized.startswith("claude"):
+        # Restrict to Claude 4+ or Claude 3.7+ (exclude Claude 3.0/3.5)
+        match = re.search(r"claude.*?(\d+)(?:\D+(\d+))?", normalized)
+        if match:
+            major = int(match.group(1))
+            minor = int(match.group(2)) if match.group(2) else 0
+            if major >= 4 or (major == 3 and minor >= 7):
+                return True
+        return False
+    if "qwen" in token_set or normalized.startswith("qwen"):
+        # Restrict to Qwen 3+ (exclude Qwen 2/2.5)
+        match = re.search(r"qwen.*?(\d+)(?:\D+(\d+))?", normalized)
+        if match:
+            major = int(match.group(1))
+            if major >= 3:
+                return True
+        return False
+    if "kimi" in token_set or normalized.startswith("kimi"):
         return True
-    if normalized.startswith("qwen3") or "qwen3" in token_set:
+    if "minimax" in token_set or normalized.startswith("minimax"):
         return True
-    if normalized.startswith(("deepseek-v3", "deepseek-v4", "deepseek-r1", "deepseek-r2")):
+    if "mimo" in token_set or normalized.startswith("mimo"):
         return True
-    if len(tokens) >= 2 and tokens[0] == "deepseek" and tokens[1] in {"v3", "v4", "r1", "r2"}:
+    if "glm" in token_set or normalized.startswith("glm"):
+        return True
+    if "step" in token_set or normalized.startswith("step"):
+        return True
+    if normalized.startswith(("deepseek-v", "deepseek-r")):
+        return True
+    if len(tokens) >= 2 and tokens[0] == "deepseek" and tokens[1].startswith(("v", "r")):
         return True
     return False
 
