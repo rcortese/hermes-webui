@@ -465,6 +465,7 @@ function _cronGatewayNoticeHtml(status) {
   return `
     <div class="detail-alert-title">${esc(title)}</div>
     <p>${esc(body)}</p>
+    
   `;
 }
 
