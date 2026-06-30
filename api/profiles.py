@@ -1470,6 +1470,20 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
                     'Cancel or wait for it to finish.'
                 )
 
+    # Remote profile proxies are logical WebUI targets backed by another persona gateway.
+    # A per-client switch must not mutate local HERMES_HOME/config/cron state.
+    try:
+        from api.config import DEFAULT_WORKSPACE as _DW, get_config
+        from api.gateway_chat import profile_proxy_for
+        remote_proxy = profile_proxy_for(name, get_config())
+    except Exception:
+        remote_proxy = None
+    if remote_proxy is not None:
+        if process_wide:
+            raise ValueError(f"Remote profile proxy {name!r} cannot be selected process-wide")
+        profiles = [{**p, 'is_active': p.get('name') == name} for p in list_profiles_api()]
+        return {'profiles': profiles, 'active': name, 'is_default': False, 'default_model': None, 'default_model_provider': 'remote-gateway', 'default_workspace': str(_DW), 'remote_proxy': True, 'profile_kind': 'remote_gateway_proxy'}
+
     # Resolve profile directory
     if _is_isolated_profile_mode():
         home = Path(_INITIAL_HERMES_HOME).expanduser()
@@ -1823,6 +1837,18 @@ def _build_profile_rows_fast() -> list | None:
     return rows
 
 
+def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
+    active = get_active_profile_name()
+    try:
+        from api.config import get_config
+        from api.gateway_chat import profile_proxy_public_entries
+        proxies = profile_proxy_public_entries(get_config())
+    except Exception:
+        proxies = []
+    merged = [*rows, *proxies]
+    return [{**p, 'is_active': p.get('name') == active} for p in merged]
+
+
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response.
 
@@ -1895,7 +1921,7 @@ def list_profiles_api() -> list:
     if cached is not None and now - cached[1] < _LIST_PROFILES_CACHE_TTL:
         active = get_active_profile_name()
         # Return a fresh copy with is_active recomputed (cheap, per-request).
-        return [{**p, 'is_active': p['name'] == active} for p in cached[0]]
+        return _with_remote_profile_proxies(cached[0])
 
     rows = _build_profile_rows_fast()
     if rows is None:
@@ -1929,13 +1955,13 @@ def list_profiles_api() -> list:
                 'enabled_skills': enabled_count,
                 'total_skills': total_count,
             })
-        return result
+        return _with_remote_profile_proxies(result)
 
     with _LIST_PROFILES_CACHE_LOCK:
         _LIST_PROFILES_CACHE = (rows, now)
 
     active = get_active_profile_name()
-    return [{**p, 'is_active': p['name'] == active} for p in rows]
+    return _with_remote_profile_proxies(rows)
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:

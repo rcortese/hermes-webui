@@ -41,6 +41,51 @@ _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
+_PROFILE_PROXY_ENV_PREFIX = "HERMES_WEBUI_PROFILE_PROXY_"
+
+def profile_proxy_entries(config_data=None, environ: dict[str, str] | None = None) -> dict[str, dict]:
+    source = os.environ if environ is None else environ
+    entries: dict[str, dict] = {}
+    for key, value in source.items():
+        if not key.startswith(_PROFILE_PROXY_ENV_PREFIX) or not key.endswith("_BASE_URL"):
+            continue
+        token = key[len(_PROFILE_PROXY_ENV_PREFIX):-len("_BASE_URL")]
+        name = token.lower().replace("_", "-")
+        prefix = f"{_PROFILE_PROXY_ENV_PREFIX}{token}_"
+        base_url = str(value or "").strip().rstrip("/")
+        if not name or not base_url:
+            continue
+        api_key_env = str(source.get(prefix + "API_KEY_ENV") or "").strip()
+        api_key = str(source.get(api_key_env) or "").strip() if api_key_env else str(source.get(prefix + "API_KEY") or "").strip()
+        entries[name] = {
+            "name": name,
+            "label": str(source.get(prefix + "LABEL") or name).strip() or name,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_key_configured": bool(api_key),
+            "remote_profile": str(source.get(prefix + "REMOTE_PROFILE") or name).strip() or name,
+            "session_key_prefix": str(source.get(prefix + "SESSION_KEY_PREFIX") or f"webui:{name}").strip() or f"webui:{name}",
+            "source": "env",
+        }
+    return entries
+
+def profile_proxy_for(name: str, config_data=None, environ: dict[str, str] | None = None) -> dict | None:
+    return profile_proxy_entries(config_data, environ).get(str(name or "").strip().lower())
+
+def profile_proxy_public_entries(config_data=None, environ: dict[str, str] | None = None) -> list[dict]:
+    public = []
+    for item in profile_proxy_entries(config_data, environ).values():
+        public.append({
+            "name": item["name"], "path": None, "is_default": False, "is_active": False,
+            "gateway_running": True, "model": item.get("remote_profile") or item["name"],
+            "provider": "remote-gateway", "has_env": bool(item.get("api_key_configured")),
+            "visible": True, "skill_count": 0, "enabled_skills": 0, "total_skills": 0,
+            "remote_proxy": True, "profile_kind": "remote_gateway_proxy",
+            "base_url": item.get("base_url"), "label": item.get("label") or item["name"],
+        })
+    preferred_order = {"jen": 0, "denholm": 1, "roy": 2, "richmond": 3, "the-elders": 4}
+    return sorted(public, key=lambda p: (preferred_order.get(p.get("name"), 100), p.get("name") or ""))
+
 
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
     """Return the explicitly selected browser chat backend.
@@ -279,7 +324,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, session_key_prefix="webui",
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -290,7 +335,7 @@ def _run_gateway_runs_api_streaming(
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
     message_content: Any = str(msg_text or "")
     if attachments:
         try:
@@ -502,6 +547,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    gateway_config=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -610,8 +656,10 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        selected_gateway = gateway_config if isinstance(gateway_config, dict) else None
+        base_url = (selected_gateway or {}).get("base_url") or _gateway_base_url(cfg)
+        api_key = (selected_gateway or {}).get("api_key") or _gateway_api_key()
+        session_key_prefix = (selected_gateway or {}).get("session_key_prefix") or "webui"
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -640,6 +688,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    session_key_prefix=session_key_prefix,
                 )
             except Exception as exc:
                 put_gateway_event("apperror", {
@@ -680,7 +729,7 @@ def _run_gateway_chat_streaming(
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:
