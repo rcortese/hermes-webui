@@ -461,6 +461,35 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
 )
 
 
+def _remote_cron_proxy_unsupported_payload(proxy: dict | None = None) -> dict:
+    proxy = proxy or {}
+    return {
+        "error": "remote_cron_proxy_unsupported",
+        "profile_kind": "remote_gateway_proxy",
+        "remote_proxy": True,
+        "backend": "unsupported_remote",
+        "profile": proxy.get("name"),
+        "label": proxy.get("label") or proxy.get("name"),
+        "message": "Cron operations for remote profile proxies are not supported here. Moss-local cron jobs were not read or modified",
+    }
+
+def _active_remote_cron_proxy() -> dict | None:
+    try:
+        from api.config import get_config
+        from api.gateway_chat import profile_proxy_for
+        return profile_proxy_for(get_active_profile_name(), get_config())
+    except Exception:
+        return None
+
+def _guard_remote_cron_proxy(handler) -> bool:
+    proxy = _active_remote_cron_proxy()
+    if proxy is None:
+        return False
+    from api.helpers import j
+    j(handler, _remote_cron_proxy_unsupported_payload(proxy))
+    return True
+
+
 def _all_profiles_query_flag(parsed_url) -> bool:
     """Return True if the request URL has `?all_profiles=1` (or true/yes).
 
@@ -12360,6 +12389,8 @@ def handle_get(handler, parsed) -> bool:
     # aggregates per visible profile home so the UI can surface hidden-row
     # counts and, when opted in, read-only foreign rows.
     if parsed.path == "/api/crons":
+        if _guard_remote_cron_proxy(handler):
+            return True
         # #4768: in split-container / minimal Docker deployments the WebUI image may
         # not ship the agent's `cron` package on its import path. Degrade gracefully
         # (empty list + cron_unavailable flag) instead of 500ing the whole Task tab.
@@ -12385,6 +12416,8 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/crons/output":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -12392,6 +12425,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -12399,6 +12434,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -12406,6 +12443,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -12413,12 +12452,16 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13912,6 +13955,8 @@ def handle_post(handler, parsed) -> bool:
     # See GET-side comment above: wrap in cron_profile_context so writes go
     # to the TLS-active profile's jobs.json instead of the process default.
     if parsed.path == "/api/crons/create":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13919,6 +13964,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13926,6 +13973,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13933,6 +13982,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13940,6 +13991,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -13947,6 +14000,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -19242,9 +19297,23 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
+    cfg = get_config()
+    backend_is_gateway = webui_gateway_chat_enabled(cfg)
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {"model_provider": model_provider}
+    if backend_is_gateway:
+        try:
+            from api.gateway_chat import profile_proxy_for
+            active_profile_name = getattr(s, "profile", None)
+            if not active_profile_name:
+                active_profile_name = get_active_profile_name()
+            gateway_profile_proxy = profile_proxy_for(active_profile_name, cfg)
+        except Exception:
+            gateway_profile_proxy = None
+        if gateway_profile_proxy is not None:
+            worker_kwargs["gateway_config"] = gateway_profile_proxy
+    if not backend_is_gateway:
+        worker_kwargs["goal_related"] = goal_related
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
