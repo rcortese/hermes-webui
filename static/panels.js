@@ -364,15 +364,67 @@ function _cronProfileName(profile){
   return (profile || '').toString().trim();
 }
 
+function _cronProfileEntry(profile){
+  const name = _cronProfileName(profile);
+  if (!name) return null;
+  const profiles = Array.isArray(_cronProfilesCache) ? _cronProfilesCache : [];
+  return profiles.find(p => _cronProfileName(p && p.name) === name) || null;
+}
+
+function _cronRouteHints(jobOrProfile){
+  const source = (jobOrProfile && typeof jobOrProfile === 'object') ? jobOrProfile : (_cronProfileEntry(jobOrProfile) || {});
+  const profile = _cronProfileName((jobOrProfile && typeof jobOrProfile === 'object') ? jobOrProfile.profile : jobOrProfile);
+  const remoteProxy = !!(source && source.remote_proxy);
+  return {
+    profile_kind: (source && source.profile_kind) || (remoteProxy ? 'remote_gateway_proxy' : (profile ? 'local_profile' : 'server_default')),
+    remote_proxy: remoteProxy,
+    backend: (source && source.backend) || (remoteProxy ? 'unsupported_remote' : 'local_hermes'),
+    backend_label: (source && source.backend_label) || (remoteProxy ? 'remote gateway' : 'local Hermes'),
+    owner_label: (source && (source.owner_label || source.label || source.name)) || profile || (t('cron_profile_server_default') || 'server default'),
+    federated_id: (source && source.federated_id) || (remoteProxy && profile ? `remote-profile:${profile}` : `profile:${profile || 'default'}`),
+    proxy_profile: (source && source.proxy_profile) || (remoteProxy ? profile : ''),
+    remote_profile: (source && source.remote_profile) || (remoteProxy ? 'default' : ''),
+  };
+}
+
 function _cronProfileLabel(profile){
   const name = _cronProfileName(profile);
+  const entry = _cronProfileEntry(name);
+  if (entry && (entry.label || entry.owner_label)) return entry.label || entry.owner_label;
   return name || (t('cron_profile_server_default') || 'server default');
 }
 
 function _cronProfileTitle(profile){
   const name = _cronProfileName(profile);
-  if (name) return (t('cron_profile_label') || 'Profile') + ': ' + name;
+  const hints = _cronRouteHints(profile);
+  if (name) {
+    const label = _cronProfileLabel(name);
+    const scope = hints.remote_proxy ? 'remote gateway profile proxy — cron management is not supported here' : 'local profile';
+    return (t('cron_profile_label') || 'Profile') + ': ' + label + ' · ' + scope;
+  }
   return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
+}
+
+function _cronBadge(text, cls, title){
+  return `<span class="${esc(cls)}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span>`;
+}
+
+function _cronOwnerBadge(job){
+  const hints = _cronRouteHints(job);
+  return _cronBadge(hints.owner_label, 'cron-owner-badge', `Owner: ${hints.owner_label}`);
+}
+
+function _cronBackendBadge(job){
+  const hints = _cronRouteHints(job);
+  const cls = hints.remote_proxy ? 'cron-backend-badge cron-backend-remote' : 'cron-backend-badge cron-backend-local';
+  const label = hints.remote_proxy ? 'remote gateway' : 'local backend';
+  return _cronBadge(label, cls, `Backend: ${hints.backend_label}`);
+}
+
+function _cronFederatedBadge(job){
+  const hints = _cronRouteHints(job);
+  if (!hints.federated_id) return '';
+  return _cronBadge('federated', 'cron-federated-badge', hints.federated_id);
 }
 
 async function loadCronProfiles(){
@@ -395,7 +447,11 @@ function _cronProfileOptions(selected){
     const name = _cronProfileName(p && p.name);
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    const label = p && p.is_default ? `${name} (${t('default') || 'default'})` : name;
+    const baseLabel = (p && (p.label || p.owner_label)) || name;
+    const suffix = p && p.remote_proxy
+      ? ' (remote gateway — unsupported)'
+      : (p && p.is_default ? ` (${t('default') || 'default'})` : '');
+    const label = `${baseLabel}${suffix}`;
     opts.push(`<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(label)}</option>`);
   }
   if (current && !seen.has(current)) {
@@ -497,6 +553,9 @@ async function loadCrons(animate) {
           ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : ''}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
           <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
+          ${_cronOwnerBadge(job)}
+          ${_cronBackendBadge(job)}
+          ${_cronFederatedBadge(job)}
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
       item.onclick = () => openCronDetail(job.id, item);
@@ -580,6 +639,7 @@ function _renderCronDetail(job){
   const script = job.script || '';
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
+  const routeHints = _cronRouteHints(job);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
@@ -596,12 +656,18 @@ function _renderCronDetail(job){
           <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
         </div>
       </div>` : '';
+  const remoteUnsupportedBanner = routeHints.remote_proxy ? `
+      <div class="detail-alert cron-attention-panel cron-remote-warning">
+        <div class="detail-alert-title">Remote cron routing only</div>
+        <p>Remote profile ownership is preserved for badges and routing hints, but cron management still fails closed for remote gateways in this WebUI.</p>
+      </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
   const promptExpanded = _cronExpansionGet(_cronPanelExpandKey(job.id, 'prompt'));
   const promptToggleLabel = promptExpanded ? (t('cron_collapse_prompt') || 'Collapse prompt') : (t('cron_expand_prompt') || 'Expand prompt');
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
+      ${remoteUnsupportedBanner}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
         <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
@@ -612,6 +678,9 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
         ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">Owner</div><div class="detail-row-value">${_cronOwnerBadge(job)}</div></div>
+        <div class="detail-row"><div class="detail-row-label">Backend</div><div class="detail-row-value">${_cronBackendBadge(job)}</div></div>
+        <div class="detail-row"><div class="detail-row-label">Federated route</div><div class="detail-row-value"><code>${esc(routeHints.federated_id || 'profile:default')}</code></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
@@ -830,10 +899,11 @@ function duplicateCurrentCron(){
 async function deleteCurrentCron(){
   if (!_currentCronDetail) return;
   const id = _currentCronDetail.id;
+  const routeHints = _cronRouteHints(_currentCronDetail);
   const _ok = await showConfirmDialog({title:t('cron_delete_confirm_title'),message:t('cron_delete_confirm_message'),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
   if(!_ok) return;
   try {
-    await api('/api/crons/delete', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/delete', {method:'POST', body: JSON.stringify({job_id: id, ...routeHints})});
     showToast(t('cron_job_deleted'));
     _clearCronDetail();
     await loadCrons();
@@ -1039,7 +1109,8 @@ async function saveCronForm(){
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
+      const routeHints = _cronRouteHints(profile);
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, ...routeHints};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
@@ -1052,7 +1123,8 @@ async function saveCronForm(){
       if (job) openCronDetail(editedId);
       return;
     }
-    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
+    const routeHints = _cronRouteHints(profile);
+    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, ...routeHints};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -1175,24 +1247,30 @@ function _checkCronWatchOnDetail(jobId) {
 }
 
 async function cronRun(id) {
+  const job = (_cronList || []).find(j => j && j.id === id) || (_currentCronDetail && _currentCronDetail.id === id ? _currentCronDetail : null);
+  const routeHints = _cronRouteHints(job || {});
   try {
-    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id, ...routeHints})});
     showToast(t('cron_job_triggered'));
     _startCronWatch(id);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
 async function cronPause(id) {
+  const job = (_cronList || []).find(j => j && j.id === id) || (_currentCronDetail && _currentCronDetail.id === id ? _currentCronDetail : null);
+  const routeHints = _cronRouteHints(job || {});
   try {
-    await api('/api/crons/pause', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/pause', {method:'POST', body: JSON.stringify({job_id: id, ...routeHints})});
     showToast(t('cron_job_paused'));
     await loadCrons();
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
 async function cronResume(id) {
+  const job = (_cronList || []).find(j => j && j.id === id) || (_currentCronDetail && _currentCronDetail.id === id ? _currentCronDetail : null);
+  const routeHints = _cronRouteHints(job || {});
   try {
-    await api('/api/crons/resume', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/resume', {method:'POST', body: JSON.stringify({job_id: id, ...routeHints})});
     showToast(t('cron_job_resumed'));
     await loadCrons();
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }

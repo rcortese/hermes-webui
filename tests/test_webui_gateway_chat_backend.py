@@ -8,6 +8,7 @@ import urllib.error
 
 import api.gateway_chat as gateway_chat
 import api.models as models
+import api.routes as routes
 import api.streaming as streaming
 from api.config import STREAMS, create_stream_channel
 from api.models import new_session
@@ -17,6 +18,8 @@ from api.gateway_chat import (
     _gateway_stream_usage,
     _gateway_tool_progress_event,
     gateway_chat_config_status,
+    profile_proxy_public_entries,
+    resolve_chat_execution_target,
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
 )
@@ -39,6 +42,128 @@ def test_gateway_chat_backend_only_accepts_explicit_gateway_aliases():
 
 def test_gateway_chat_backend_can_be_enabled_from_config_without_env():
     assert webui_chat_backend_mode({"webui_chat_backend": "api_server"}, {}) == "gateway"
+
+
+def test_remote_gateway_proxy_routes_even_when_global_backend_is_unset():
+    decision = resolve_chat_execution_target(
+        "jen",
+        {},
+        {
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL": "http://jen:8642/api?token=secret",
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_REMOTE_PROFILE": "jen",
+        },
+        profiles=[{"name": "default", "remote_proxy": False}],
+    )
+
+    assert decision["ok"] is True
+    assert decision["execution_target"] == "remote_gateway"
+    assert decision["profile_kind"] == "remote_gateway_proxy"
+    assert decision["remote_persona"] == "jen"
+    assert decision["base_url_host_only"] == "jen:8642"
+
+
+def test_unknown_selected_profile_fails_closed_instead_of_falling_back_local():
+    decision = resolve_chat_execution_target(
+        "jen",
+        {},
+        {},
+        profiles=[{"name": "default", "remote_proxy": False}],
+    )
+
+    assert decision["ok"] is False
+    assert decision["execution_target"] == "fail_closed"
+    assert decision["error_type"] == "profile_not_configured"
+
+
+def test_ambiguous_local_and_remote_profile_name_fails_closed():
+    decision = resolve_chat_execution_target(
+        "jen",
+        {},
+        {"HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL": "http://jen:8642"},
+        profiles=[{"name": "jen", "remote_proxy": False}],
+    )
+
+    assert decision["ok"] is False
+    assert decision["status"] == 409
+    assert decision["error_type"] == "ambiguous_profile"
+
+
+def test_known_remote_proxy_without_base_url_fails_closed_as_incomplete():
+    decision = resolve_chat_execution_target(
+        "jen",
+        {},
+        {},
+        profiles=[{"name": "jen", "remote_proxy": True, "remote_profile": "jen"}],
+    )
+
+    assert decision["ok"] is False
+    assert decision["error_type"] == "remote_proxy_incomplete"
+
+
+def test_profile_proxy_public_entries_redact_base_url_and_never_expose_api_key():
+    public = profile_proxy_public_entries(
+        {},
+        {
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL": "http://user:supersecret@jen:8642/v1",
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_API_KEY": "top-secret",
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_LABEL": "Jen",
+        },
+    )
+
+    assert public == [{
+        "name": "jen",
+        "path": None,
+        "is_default": False,
+        "is_active": False,
+        "gateway_running": True,
+        "model": "jen",
+        "provider": "remote-gateway",
+        "has_env": True,
+        "skill_count": 0,
+        "enabled_skills": 0,
+        "total_skills": 0,
+        "remote_proxy": True,
+        "profile_kind": "remote_gateway_proxy",
+        "base_url": "jen:8642",
+        "base_url_host_only": "jen:8642",
+        "label": "Jen",
+        "remote_profile": "jen",
+        "proxy_profile": "jen",
+        "backend": "remote_gateway",
+        "backend_label": "remote gateway",
+        "owner_label": "Jen",
+        "federated_id": "remote-profile:jen",
+        "capabilities": {
+            "chat": "remote_gateway",
+            "cron": "unsupported_remote_no_api",
+            "memory": "unsupported_remote_no_api",
+            "filesystem": "unsupported_remote_no_api",
+            "kanban_dispatch": "not_via_webui_proxy",
+        },
+    }]
+    assert "top-secret" not in repr(public)
+
+
+def test_execution_target_logging_is_host_only_and_never_logs_secrets(caplog):
+    decision = resolve_chat_execution_target(
+        "jen",
+        {},
+        {
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL": "http://user:supersecret@jen:8642/v1/chat/completions",
+            "HERMES_WEBUI_PROFILE_PROXY_JEN_REMOTE_PROFILE": "jen",
+        },
+        profiles=[{"name": "default", "remote_proxy": False}],
+    )
+
+    with caplog.at_level("INFO"):
+        gateway_chat.log_chat_execution_target(decision)
+
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "selected_profile=jen" in rendered
+    assert "execution_target=remote_gateway" in rendered
+    assert "base_url_host_only=jen:8642" in rendered
+    assert "supersecret" not in rendered
+    assert "/v1/chat/completions" not in rendered
 
 
 def test_gateway_chat_config_status_is_redacted_and_reports_missing_key():
@@ -280,7 +405,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
-    assert [m["content"] for m in payload["messages"]] == [
+    assert payload["messages"][0]["role"] == "system"
+    assert "WebUI progress guidance" in payload["messages"][0]["content"]
+    assert [m["content"] for m in payload["messages"][1:]] == [
         "prefill",
         "webui session context",
         "Say hello",
@@ -356,7 +483,169 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     )
 
     content = captured["body"]["messages"][-1]["content"]
-    assert captured["body"]["messages"][0] == {"role": "user", "content": "webui session context"}
+    assert captured["body"]["messages"][0]["role"] == "system"
+    assert "WebUI progress guidance" in captured["body"]["messages"][0]["content"]
+    assert captured["body"]["messages"][1] == {"role": "user", "content": "webui session context"}
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_chat_start_remote_proxy_uses_gateway_worker_without_local_fallback(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setenv("HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL", "http://jen:8642")
+    monkeypatch.setenv("HERMES_WEBUI_PROFILE_PROXY_JEN_REMOTE_PROFILE", "jen")
+
+    calls = {}
+
+    def fake_gateway(*args, **kwargs):
+        calls["gateway"] = {"args": args, "kwargs": kwargs}
+
+    def fake_agent(*args, **kwargs):
+        raise AssertionError("remote gateway proxy must not call _run_agent_streaming")
+
+    class FakeThread:
+        def __init__(self, *, target, args, kwargs, daemon):
+            calls["target"] = target
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+
+        def start(self):
+            calls["target"](*calls["args"], **calls["kwargs"])
+
+    monkeypatch.setattr(routes, "_run_gateway_chat_streaming", fake_gateway)
+    monkeypatch.setattr(routes, "_run_agent_streaming", fake_agent)
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    s = new_session()
+    s.profile = "jen"
+    s.save()
+
+    response = routes._start_chat_stream_for_session(
+        s,
+        selected_profile="jen",
+        msg="Hello Jen",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider=None,
+    )
+
+    assert response["session_id"] == s.session_id
+    assert calls["target"] is fake_gateway
+    assert calls["kwargs"]["gateway_config"]["base_url"] == "http://jen:8642"
+    assert calls["kwargs"]["gateway_config"]["remote_profile"] == "jen"
+
+
+
+def test_chat_start_unknown_remote_profile_fails_closed_before_thread_start(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "resolve_chat_execution_target",
+        lambda selected_profile, config: {
+            "ok": False,
+            "selected_profile": selected_profile,
+            "profile_kind": "remote_gateway_proxy",
+            "execution_target": "fail_closed",
+            "remote_persona": "jen",
+            "base_url_host_only": None,
+            "error": "proxy missing",
+            "error_type": "remote_proxy_incomplete",
+            "status": 502,
+        },
+    )
+
+    started = {"value": False}
+
+    class FakeThread:
+        def __init__(self, *, target, args, kwargs, daemon):
+            started["value"] = True
+
+        def start(self):
+            started["value"] = True
+
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    s = new_session()
+    s.profile = "jen"
+    s.save()
+
+    response = routes._start_chat_stream_for_session(
+        s,
+        selected_profile="jen",
+        msg="Hello Jen",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider=None,
+    )
+
+    assert response["_status"] == 502
+    assert response["error_type"] == "remote_proxy_incomplete"
+    assert response["execution_target"] == "fail_closed"
+    assert started["value"] is False
+
+
+def test_remote_gateway_proxy_offline_emits_proxy_error_without_local_fallback(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-offline-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Hello Jen"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Hello Jen",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        gateway_config={
+            "base_url": "http://jen:8642",
+            "remote_profile": "jen",
+            "session_key_prefix": "webui:jen",
+        },
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+
+    assert any(
+        event == "apperror"
+        and payload.get("type") == "gateway_error"
+        and payload.get("label") == "Gateway request failed"
+        for event, payload in events
+    )
+    saved = models.get_session(s.session_id)
+    assert saved.active_stream_id is None
+    assert stream_id not in STREAMS

@@ -206,6 +206,16 @@ _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
 
 
+def _local_profile_capabilities() -> dict[str, str]:
+    return {
+        'chat': 'local_hermes',
+        'cron': 'local_hermes',
+        'memory': 'local_hermes',
+        'filesystem': 'local_hermes',
+        'kanban_dispatch': 'local_hermes',
+    }
+
+
 def _invalidate_root_profile_cache() -> None:
     """Drop the memoized root-profile-name set.
 
@@ -889,8 +899,16 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
                     'Cancel or wait for it to finish.'
                 )
 
-    # Resolve profile directory
+    # Resolve profile directory. Remote gateway proxies are cookie/TLS scoped UI
+    # entries rather than local on-disk Hermes homes, so per-client switches
+    # may select them without requiring ~/.hermes/profiles/<name> to exist.
+    selected_profile = next(
+        (p for p in list_profiles_api() if str((p or {}).get('name') or '').strip() == name),
+        None,
+    )
     if _is_root_profile(name):
+        home = _DEFAULT_HERMES_HOME
+    elif selected_profile and selected_profile.get('remote_proxy'):
         home = _DEFAULT_HERMES_HOME
     else:
         home = _resolve_named_profile_home(name)
@@ -1002,23 +1020,67 @@ def list_profiles_api() -> list:
         from hermes_cli.profiles import list_profiles
         infos = list_profiles()
     except ImportError:
-        # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+        infos = []
+        result = [_default_profile_dict()]
+    else:
+        active = get_active_profile_name()
+        result = []
+        for p in infos:
+            result.append({
+                'name': p.name,
+                'path': str(p.path),
+                'is_default': p.is_default,
+                'is_active': p.name == active,
+                'gateway_running': p.gateway_running,
+                'model': p.model,
+                'provider': p.provider,
+                'has_env': p.has_env,
+                'skill_count': p.skill_count,
+                'profile_kind': 'local_profile',
+                'remote_proxy': False,
+                'backend': 'local_hermes',
+                'backend_label': 'local Hermes',
+                'owner_label': p.name,
+                'label': p.name,
+                'capabilities': _local_profile_capabilities(),
+            })
 
-    active = get_active_profile_name()
-    result = []
-    for p in infos:
-        result.append({
-            'name': p.name,
-            'path': str(p.path),
-            'is_default': p.is_default,
-            'is_active': p.name == active,
-            'gateway_running': p.gateway_running,
-            'model': p.model,
-            'provider': p.provider,
-            'has_env': p.has_env,
-            'skill_count': p.skill_count,
-        })
+    existing_names = {str(item.get('name') or '').strip() for item in result}
+    try:
+        from api.gateway_chat import profile_proxy_public_entries
+        for proxy in profile_proxy_public_entries():
+            name = str((proxy or {}).get('name') or '').strip()
+            if not name or name in existing_names:
+                continue
+            item = dict(proxy)
+            item.setdefault('path', None)
+            item.setdefault('is_default', False)
+            item.setdefault('is_active', False)
+            item.setdefault('gateway_running', True)
+            item.setdefault('model', name)
+            item.setdefault('provider', 'remote-gateway')
+            item.setdefault('has_env', False)
+            item.setdefault('skill_count', 0)
+            item.setdefault('profile_kind', 'remote_gateway_proxy')
+            item.setdefault('remote_proxy', True)
+            item.setdefault('backend', 'unsupported_remote')
+            item.setdefault('backend_label', 'remote gateway')
+            item.setdefault('owner_label', item.get('label') or name)
+            item.setdefault('label', item.get('label') or name)
+            item.setdefault('federated_id', f'remote-profile:{name}')
+            item.setdefault('proxy_profile', name)
+            item.setdefault('remote_profile', item.get('remote_profile') or 'default')
+            item.setdefault('capabilities', {
+                'chat': 'remote_gateway',
+                'cron': 'unsupported_remote_no_api',
+                'memory': 'unsupported_remote_no_api',
+                'filesystem': 'unsupported_remote_no_api',
+                'kanban_dispatch': 'not_via_webui_proxy',
+            })
+            result.append(item)
+            existing_names.add(name)
+    except Exception:
+        pass
     return result
 
 
@@ -1034,6 +1096,13 @@ def _default_profile_dict() -> dict:
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
+        'profile_kind': 'local_profile',
+        'remote_proxy': False,
+        'backend': 'local_hermes',
+        'backend_label': 'local Hermes',
+        'owner_label': 'default',
+        'label': 'default',
+        'capabilities': _local_profile_capabilities(),
     }
 
 

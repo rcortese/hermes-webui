@@ -674,6 +674,49 @@ def _cron_job_for_api(job: dict) -> dict:
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
+    profile_name = str(payload.get("profile") or "").strip()
+    profile_meta = None
+    if profile_name:
+        try:
+            from api.profiles import list_profiles_api
+            profile_meta = next(
+                (item for item in list_profiles_api() if str(item.get("name") or "").strip() == profile_name),
+                None,
+            )
+        except Exception:
+            profile_meta = None
+    remote_proxy = bool(payload.get("remote_proxy"))
+    profile_kind = payload.get("profile_kind")
+    owner_label = payload.get("owner_label")
+    backend = payload.get("backend")
+    backend_label = payload.get("backend_label")
+    federated_id = payload.get("federated_id")
+    if profile_meta:
+        remote_proxy = bool(profile_meta.get("remote_proxy")) or remote_proxy
+        profile_kind = profile_kind or profile_meta.get("profile_kind")
+        owner_label = owner_label or profile_meta.get("owner_label") or profile_meta.get("label") or profile_name
+        backend = backend or profile_meta.get("backend")
+        backend_label = backend_label or profile_meta.get("backend_label")
+        federated_id = federated_id or profile_meta.get("federated_id")
+        if remote_proxy:
+            payload.setdefault("proxy_profile", profile_meta.get("proxy_profile") or profile_name)
+            payload.setdefault("remote_profile", profile_meta.get("remote_profile") or "default")
+    if not profile_kind:
+        profile_kind = "remote_gateway_proxy" if remote_proxy else "local_profile"
+    if not owner_label:
+        owner_label = profile_name or "default"
+    if not backend:
+        backend = "unsupported_remote" if remote_proxy else "local_hermes"
+    if not backend_label:
+        backend_label = "remote gateway" if remote_proxy else "local Hermes"
+    if not federated_id:
+        federated_id = f"remote-profile:{profile_name}" if remote_proxy and profile_name else (f"profile:{profile_name}" if profile_name else "profile:default")
+    payload["remote_proxy"] = remote_proxy
+    payload["profile_kind"] = profile_kind
+    payload["owner_label"] = owner_label
+    payload["backend"] = backend
+    payload["backend_label"] = backend_label
+    payload["federated_id"] = federated_id
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
     return payload
 
@@ -705,6 +748,101 @@ def _normalize_cron_profile_value(value) -> str | None:
     if profile not in _available_cron_profile_names():
         raise ValueError(f"Unknown profile: {profile}")
     return profile
+
+
+def _cron_profile_metadata(profile_name: str | None) -> dict | None:
+    name = str(profile_name or "").strip()
+    if not name:
+        return None
+    try:
+        from api.profiles import list_profiles_api
+    except Exception:
+        return None
+    for profile in list_profiles_api():
+        try:
+            if str(profile.get("name") or "").strip() == name:
+                return dict(profile)
+        except AttributeError:
+            continue
+    return None
+
+
+def _cron_profile_capabilities(profile_meta: dict | None) -> dict[str, str]:
+    if not isinstance(profile_meta, dict):
+        return {}
+    raw = profile_meta.get("capabilities")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _cron_remote_profile_blocked(profile_name: str | None) -> dict | None:
+    profile_meta = _cron_profile_metadata(profile_name)
+    if not isinstance(profile_meta, dict):
+        return None
+    capabilities = _cron_profile_capabilities(profile_meta)
+    if capabilities.get("cron") == "unsupported_remote_no_api":
+        return profile_meta
+    if bool(profile_meta.get("remote_proxy")):
+        return profile_meta
+    return None
+
+
+def _cron_remote_guard_response(
+    handler,
+    *,
+    action: str,
+    profile_name: str | None,
+    profile_meta: dict | None = None,
+    route: str | None = None,
+):
+    profile = str(profile_name or "").strip()
+    meta = dict(profile_meta or _cron_profile_metadata(profile) or {})
+    capabilities = _cron_profile_capabilities(meta)
+    label = (
+        str(meta.get("label") or "").strip()
+        or str(meta.get("owner_label") or "").strip()
+        or profile
+        or "remote gateway profile"
+    )
+    route_label = str(route or "").strip() or f"/api/crons/{action}"
+    reason = (
+        f"Remote gateway profile '{label}' advertises cron=unsupported_remote_no_api; "
+        f"{route_label} fails closed until a real remote cron API exists."
+    )
+    return j(
+        handler,
+        {
+            "ok": False,
+            "error": reason,
+            "reason": reason,
+            "error_type": "unsupported_remote_no_api",
+            "profile": profile or None,
+            "profile_kind": meta.get("profile_kind") or "remote_gateway_proxy",
+            "remote_proxy": bool(meta.get("remote_proxy")),
+            "capabilities": capabilities,
+        },
+        status=409,
+    )
+
+
+def _guard_remote_cron_profile(
+    handler,
+    *,
+    action: str,
+    profile_name: str | None,
+    profile_meta: dict | None = None,
+    route: str | None = None,
+):
+    blocked = dict(profile_meta or {}) if isinstance(profile_meta, dict) else _cron_remote_profile_blocked(profile_name)
+    if blocked:
+        _cron_remote_guard_response(
+            handler,
+            action=action,
+            profile_name=profile_name,
+            profile_meta=blocked,
+            route=route,
+        )
+        return True
+    return False
 
 
 def _profile_home_for_cron_job(job: dict):
@@ -2774,7 +2912,11 @@ from api.streaming import (
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import (
+    _run_gateway_chat_streaming,
+    log_chat_execution_target,
+    resolve_chat_execution_target,
+)
 from api.run_journal import (
     find_run_summary,
     read_run_events,
@@ -5078,6 +5220,17 @@ def handle_get(handler, parsed) -> bool:
     # os.environ (process-global) at call time. Wrap in cron_profile_context
     # so the TLS-active profile's jobs.json is read, not the process default.
     if parsed.path == "/api/crons":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="list",
+            profile_name=profile,
+            route="/api/crons",
+        )
+        if blocked:
+            return blocked
         from cron.jobs import list_jobs
         from api.profiles import cron_profile_context
 
@@ -5085,36 +5238,102 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})
 
     if parsed.path == "/api/crons/output":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="output",
+            profile_name=profile,
+            route="/api/crons/output",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="history",
+            profile_name=profile,
+            route="/api/crons/history",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="run-detail",
+            profile_name=profile,
+            route="/api/crons/run",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="recent",
+            profile_name=profile,
+            route="/api/crons/recent",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="status",
+            profile_name=profile,
+            route="/api/crons/status",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
+        from api.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
+        blocked = _guard_remote_cron_profile(
+            handler,
+            action="delivery-options",
+            profile_name=profile,
+            route="/api/crons/delivery-options",
+        )
+        if blocked:
+            return blocked
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -9652,6 +9871,7 @@ def _is_hidden_empty_session(s) -> bool:
 def _start_chat_stream_for_session(
     s,
     *,
+    selected_profile: str | None = None,
     msg: str,
     attachments=None,
     workspace: str,
@@ -9736,10 +9956,30 @@ def _start_chat_stream_for_session(
     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
+    effective_profile = str(selected_profile or getattr(s, "profile", None) or "").strip() or "default"
+    execution_target = resolve_chat_execution_target(effective_profile, get_config())
+    log_chat_execution_target(execution_target)
+    if not execution_target.get("ok"):
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        with session_lock:
+            _clear_stale_stream_state(s)
+        return {
+            "error": execution_target.get("error") or "chat execution target could not be resolved",
+            "error_type": execution_target.get("error_type"),
+            "selected_profile": execution_target.get("selected_profile"),
+            "profile_kind": execution_target.get("profile_kind"),
+            "execution_target": execution_target.get("execution_target"),
+            "remote_persona": execution_target.get("remote_persona"),
+            "base_url_host_only": execution_target.get("base_url_host_only"),
+            "_status": int(execution_target.get("status") or 502),
+        }
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
+    backend_is_gateway = execution_target.get("execution_target") in {"remote_gateway", "local_gateway"}
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider}
+    if backend_is_gateway:
+        worker_kwargs["gateway_config"] = execution_target.get("gateway_config")
     if not backend_is_gateway:
         worker_kwargs["goal_related"] = goal_related
     thr = threading.Thread(
@@ -10021,6 +10261,7 @@ def _handle_chat_start(handler, body, diag=None):
             def _legacy_start_run(request: StartRunRequest) -> dict:
                 return _start_chat_stream_for_session(
                     s,
+                    selected_profile=request.profile,
                     msg=request.message,
                     attachments=request.attachments,
                     workspace=request.workspace or workspace,
@@ -10059,6 +10300,7 @@ def _handle_chat_start(handler, body, diag=None):
         else:
             response = _start_chat_stream_for_session(
                 s,
+                selected_profile=getattr(s, "profile", None),
                 msg=msg,
                 attachments=attachments,
                 workspace=workspace,
@@ -10319,6 +10561,9 @@ def _handle_cron_create(handler, body):
         from cron.jobs import create_job, update_job
 
         profile = _normalize_cron_profile_value(body.get("profile"))
+        blocked = _guard_remote_cron_profile(handler, action="create", profile_name=profile)
+        if blocked:
+            return blocked
         toast_notifications = body.get("toast_notifications") is not False
         job = create_job(
             prompt=body["prompt"],
@@ -10360,7 +10605,11 @@ def _handle_cron_update(handler, body):
         require(body, "job_id")
     except ValueError as e:
         return bad(handler, str(e))
-    from cron.jobs import update_job
+    from cron.jobs import get_job, update_job
+
+    existing_job = get_job(body["job_id"])
+    if not existing_job:
+        return bad(handler, "Job not found", 404)
 
     try:
         updates = {}
@@ -10373,6 +10622,10 @@ def _handle_cron_update(handler, body):
                 updates[k] = v
     except ValueError as e:
         return bad(handler, str(e))
+    target_profile = updates.get("profile") if "profile" in updates else existing_job.get("profile")
+    blocked = _guard_remote_cron_profile(handler, action="update", profile_name=target_profile)
+    if blocked:
+        return blocked
     job = update_job(body["job_id"], updates)
     if not job:
         return bad(handler, "Job not found", 404)
@@ -10384,8 +10637,14 @@ def _handle_cron_delete(handler, body):
         require(body, "job_id")
     except ValueError as e:
         return bad(handler, str(e))
-    from cron.jobs import remove_job
+    from cron.jobs import get_job, remove_job
 
+    job = get_job(body["job_id"])
+    if not job:
+        return bad(handler, "Job not found", 404)
+    blocked = _guard_remote_cron_profile(handler, action="delete", profile_name=job.get("profile"))
+    if blocked:
+        return blocked
     ok = remove_job(body["job_id"])
     if not ok:
         return bad(handler, "Job not found", 404)
@@ -10401,6 +10660,9 @@ def _handle_cron_run(handler, body):
     job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
+    blocked = _guard_remote_cron_profile(handler, action="run", profile_name=job.get("profile"))
+    if blocked:
+        return blocked
     # Prevent double-run: reject if the job is already tracked as running
     already_running, elapsed = _is_cron_running(job_id)
     if already_running:
@@ -10431,8 +10693,14 @@ def _handle_cron_pause(handler, body):
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
-    from cron.jobs import pause_job
+    from cron.jobs import get_job, pause_job
 
+    job = get_job(job_id)
+    if not job:
+        return bad(handler, "Job not found", 404)
+    blocked = _guard_remote_cron_profile(handler, action="pause", profile_name=job.get("profile"))
+    if blocked:
+        return blocked
     result = pause_job(job_id, reason=body.get("reason"))
     if result:
         return j(handler, {"ok": True, "job": result})
@@ -10443,8 +10711,14 @@ def _handle_cron_resume(handler, body):
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
-    from cron.jobs import resume_job
+    from cron.jobs import get_job, resume_job
 
+    job = get_job(job_id)
+    if not job:
+        return bad(handler, "Job not found", 404)
+    blocked = _guard_remote_cron_profile(handler, action="resume", profile_name=job.get("profile"))
+    if blocked:
+        return blocked
     result = resume_job(job_id)
     if result:
         return j(handler, {"ok": True, "job": result})

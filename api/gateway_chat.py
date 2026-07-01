@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlsplit
 
 from api.config import (
     CANCEL_FLAGS,
@@ -32,7 +33,316 @@ logger = logging.getLogger(__name__)
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
+_PROFILE_PROXY_ENV_PREFIX = "HERMES_WEBUI_PROFILE_PROXY_"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+
+
+def _base_url_host_only(raw_url: str | None) -> str | None:
+    value = str(raw_url or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return None
+    host = parsed.hostname or None
+    if not host:
+        return None
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _execution_target_error(
+    *,
+    selected_profile: str,
+    profile_kind: str,
+    remote_persona: str | None,
+    base_url: str | None,
+    message: str,
+    error_type: str,
+    status: int = 502,
+) -> dict:
+    return {
+        "ok": False,
+        "selected_profile": selected_profile,
+        "profile_kind": profile_kind,
+        "execution_target": "fail_closed",
+        "remote_persona": remote_persona,
+        "base_url_host_only": _base_url_host_only(base_url),
+        "error": message,
+        "error_type": error_type,
+        "status": status,
+    }
+
+
+def _profile_proxy_entries_from_env(environ: dict[str, str] | None = None) -> dict[str, dict]:
+    """Return configured remote profile proxies from environment variables.
+
+    Shape per profile:
+      HERMES_WEBUI_PROFILE_PROXY_JEN_BASE_URL=http://jen:8642
+      HERMES_WEBUI_PROFILE_PROXY_JEN_API_KEY_ENV=API_SERVER_KEY
+      HERMES_WEBUI_PROFILE_PROXY_JEN_LABEL=Jen
+
+    API keys are resolved at request time and are never included in the public
+    profile list.
+    """
+    source = os.environ if environ is None else environ
+    entries: dict[str, dict] = {}
+    for key, value in source.items():
+        if not key.startswith(_PROFILE_PROXY_ENV_PREFIX) or not key.endswith("_BASE_URL"):
+            continue
+        token = key[len(_PROFILE_PROXY_ENV_PREFIX):-len("_BASE_URL")]
+        if not token:
+            continue
+        name = token.lower().replace("_", "-")
+        prefix = f"{_PROFILE_PROXY_ENV_PREFIX}{token}_"
+        base_url = str(value or "").strip().rstrip("/")
+        if not base_url:
+            continue
+        api_key_env = str(source.get(prefix + "API_KEY_ENV") or "").strip()
+        api_key = str(source.get(api_key_env) or "").strip() if api_key_env else str(source.get(prefix + "API_KEY") or "").strip()
+        entries[name] = {
+            "name": name,
+            "label": str(source.get(prefix + "LABEL") or name).strip() or name,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_key_configured": bool(api_key),
+            "remote_profile": str(source.get(prefix + "REMOTE_PROFILE") or name).strip() or name,
+            "session_key_prefix": str(source.get(prefix + "SESSION_KEY_PREFIX") or f"webui:{name}").strip() or f"webui:{name}",
+            "source": "env",
+        }
+    return entries
+
+
+def _profile_proxy_entries_from_config(config_data=None, environ: dict[str, str] | None = None) -> dict[str, dict]:
+    cfg = config_data if isinstance(config_data, dict) else {}
+    webui_cfg = cfg.get("webui") if isinstance(cfg.get("webui"), dict) else {}
+    raw = webui_cfg.get("profile_proxies") if isinstance(webui_cfg, dict) else None
+    if raw is None:
+        raw = cfg.get("webui_profile_proxies")
+    if not isinstance(raw, dict):
+        return {}
+    source = os.environ if environ is None else environ
+    entries: dict[str, dict] = {}
+    for name, item in raw.items():
+        if not isinstance(item, dict):
+            continue
+        profile = str(name or "").strip().lower()
+        base_url = str(item.get("base_url") or "").strip().rstrip("/")
+        if not profile or not base_url:
+            continue
+        api_key_env = str(item.get("api_key_env") or "").strip()
+        api_key = str(source.get(api_key_env) or "").strip() if api_key_env else str(item.get("api_key") or "").strip()
+        entries[profile] = {
+            "name": profile,
+            "label": str(item.get("label") or profile).strip() or profile,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_key_configured": bool(api_key),
+            "remote_profile": str(item.get("remote_profile") or profile).strip() or profile,
+            "session_key_prefix": str(item.get("session_key_prefix") or f"webui:{profile}").strip() or f"webui:{profile}",
+            "source": "config",
+        }
+    return entries
+
+
+def profile_proxy_entries(config_data=None, environ: dict[str, str] | None = None) -> dict[str, dict]:
+    entries = _profile_proxy_entries_from_config(config_data, environ)
+    entries.update(_profile_proxy_entries_from_env(environ))
+    return entries
+
+
+def profile_proxy_for(name: str, config_data=None, environ: dict[str, str] | None = None) -> dict | None:
+    return profile_proxy_entries(config_data, environ).get(str(name or "").strip().lower())
+
+
+_PROFILE_PROXY_PUBLIC_ORDER = {
+    "jen": 0,
+    "denholm": 1,
+    "roy": 2,
+    "richmond": 3,
+    "the-elders": 4,
+}
+
+
+def _profile_proxy_public_sort_key(profile: dict) -> tuple[int, str]:
+    name = str(profile.get("name") or "")
+    return (_PROFILE_PROXY_PUBLIC_ORDER.get(name, len(_PROFILE_PROXY_PUBLIC_ORDER)), name)
+
+
+def _remote_proxy_capabilities() -> dict[str, str]:
+    return {
+        "chat": "remote_gateway",
+        "cron": "unsupported_remote_no_api",
+        "memory": "unsupported_remote_no_api",
+        "filesystem": "unsupported_remote_no_api",
+        "kanban_dispatch": "not_via_webui_proxy",
+    }
+
+
+def profile_proxy_public_entries(config_data=None, environ: dict[str, str] | None = None) -> list[dict]:
+    public = []
+    for item in profile_proxy_entries(config_data, environ).values():
+        base_url_host_only = _base_url_host_only(item.get("base_url"))
+        public.append({
+            "name": item["name"],
+            "path": None,
+            "is_default": False,
+            "is_active": False,
+            "gateway_running": True,
+            "model": item.get("remote_profile") or item["name"],
+            "provider": "remote-gateway",
+            "has_env": bool(item.get("api_key_configured")),
+            "skill_count": 0,
+            "enabled_skills": 0,
+            "total_skills": 0,
+            "remote_proxy": True,
+            "profile_kind": "remote_gateway_proxy",
+            "base_url": base_url_host_only,
+            "base_url_host_only": base_url_host_only,
+            "label": item.get("label") or item["name"],
+            "remote_profile": item.get("remote_profile") or item["name"],
+            "proxy_profile": item["name"],
+            "backend": "remote_gateway",
+            "backend_label": "remote gateway",
+            "owner_label": item.get("label") or item["name"],
+            "federated_id": f"remote-profile:{item['name']}",
+            "capabilities": _remote_proxy_capabilities(),
+        })
+    return sorted(public, key=_profile_proxy_public_sort_key)
+
+
+def resolve_chat_execution_target(
+    selected_profile: str | None,
+    config_data=None,
+    environ: dict[str, str] | None = None,
+    *,
+    profiles: list[dict] | None = None,
+) -> dict:
+    """Resolve the effective execution target for a WebUI chat request.
+
+    Remote gateway proxies must route through their configured persona API even
+    when the global gateway backend is disabled. Unknown or incomplete remote
+    selections fail closed; they must never fall back to local agent execution.
+    """
+    selected = str(selected_profile or "").strip() or "default"
+    cfg = config_data if isinstance(config_data, dict) else {}
+    source = dict(os.environ if environ is None else environ)
+    known_profiles = profiles
+    if known_profiles is None:
+        try:
+            from api.profiles import list_profiles_api
+
+            known_profiles = list_profiles_api()
+        except Exception:
+            known_profiles = []
+
+    local_profile = None
+    remote_profile = None
+    for item in known_profiles or []:
+        if str((item or {}).get("name") or "").strip() != selected:
+            continue
+        if bool((item or {}).get("remote_proxy")):
+            remote_profile = dict(item)
+        else:
+            local_profile = dict(item)
+
+    proxy = profile_proxy_for(selected, cfg, source)
+    if proxy and local_profile:
+        return _execution_target_error(
+            selected_profile=selected,
+            profile_kind="ambiguous_profile",
+            remote_persona=str(proxy.get("remote_profile") or selected).strip() or selected,
+            base_url=proxy.get("base_url"),
+            message=(
+                f"Selected profile '{selected}' is ambiguous: both a local profile and a remote gateway proxy exist. "
+                "Disambiguate the selection before starting chat."
+            ),
+            error_type="ambiguous_profile",
+            status=409,
+        )
+
+    if proxy:
+        base_url = str(proxy.get("base_url") or "").strip().rstrip("/")
+        remote_persona = str(proxy.get("remote_profile") or selected).strip() or selected
+        if not base_url:
+            return _execution_target_error(
+                selected_profile=selected,
+                profile_kind="remote_gateway_proxy",
+                remote_persona=remote_persona,
+                base_url=base_url,
+                message=f"Remote gateway proxy '{selected}' is not fully configured (missing base URL).",
+                error_type="remote_proxy_incomplete",
+            )
+        gateway_config = dict(proxy)
+        gateway_config["base_url"] = base_url
+        return {
+            "ok": True,
+            "selected_profile": selected,
+            "profile_kind": "remote_gateway_proxy",
+            "execution_target": "remote_gateway",
+            "remote_persona": remote_persona,
+            "base_url_host_only": _base_url_host_only(base_url),
+            "gateway_config": gateway_config,
+        }
+
+    if remote_profile:
+        return _execution_target_error(
+            selected_profile=selected,
+            profile_kind="remote_gateway_proxy",
+            remote_persona=str((remote_profile or {}).get("remote_profile") or selected).strip() or selected,
+            base_url=(remote_profile or {}).get("base_url"),
+            message=f"Remote gateway proxy '{selected}' is not fully configured (missing base URL).",
+            error_type="remote_proxy_incomplete",
+        )
+
+    gateway_enabled = webui_gateway_chat_enabled(cfg, source)
+    if local_profile or selected == "default":
+        execution_target = "local_gateway" if gateway_enabled else "local_legacy"
+        base_url = _gateway_base_url(cfg, source) if execution_target == "local_gateway" else None
+        gateway_config = None
+        if execution_target == "local_gateway":
+            gateway_config = {
+                "base_url": str(base_url or "").strip().rstrip("/"),
+                "api_key": _gateway_api_key(source),
+                "session_key_prefix": "webui",
+            }
+        return {
+            "ok": True,
+            "selected_profile": selected,
+            "profile_kind": "local_profile",
+            "execution_target": execution_target,
+            "remote_persona": None,
+            "base_url_host_only": _base_url_host_only(base_url),
+            "gateway_config": gateway_config,
+        }
+
+    return _execution_target_error(
+        selected_profile=selected,
+        profile_kind="unknown_profile",
+        remote_persona=None,
+        base_url=None,
+        message=(
+            f"Selected profile '{selected}' is not configured as a local profile or remote gateway proxy. "
+            "Chat cannot fall back to a local runtime for this selection."
+        ),
+        error_type="profile_not_configured",
+        status=404,
+    )
+
+
+def log_chat_execution_target(decision: dict) -> None:
+    logger.info(
+        "webui_chat_execution_target selected_profile=%s profile_kind=%s execution_target=%s remote_persona=%s base_url_host_only=%s",
+        decision.get("selected_profile"),
+        decision.get("profile_kind"),
+        decision.get("execution_target"),
+        decision.get("remote_persona"),
+        decision.get("base_url_host_only"),
+    )
 
 
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
@@ -187,6 +497,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    gateway_config: dict | None = None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -247,13 +558,17 @@ def _run_gateway_chat_streaming(
         cfg = get_config()
         try:
             from api.streaming import (
+                _WEBUI_PROGRESS_PROMPT,
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
                 _public_prefill_context_status,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
-            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            prefill_messages = [
+                {"role": "system", "content": _WEBUI_PROGRESS_PROMPT},
+                *_prefill_messages_with_webui_context(prefill_context, cfg),
+            ]
             put_gateway_event("context_status", {
                 "session_id": session_id,
                 "prefill": _public_prefill_context_status(prefill_context),
@@ -261,8 +576,9 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        selected_gateway = gateway_config if isinstance(gateway_config, dict) else None
+        base_url = (selected_gateway or {}).get("base_url") or _gateway_base_url(cfg)
+        api_key = (selected_gateway or {}).get("api_key") or _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -273,7 +589,8 @@ def _run_gateway_chat_streaming(
             headers["Authorization"] = f"Bearer {api_key}"
             # Scope Gateway long-term continuity to this WebUI conversation
             # without exposing the browser's auth cookie or CSRF material.
-            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+            session_key_prefix = (selected_gateway or {}).get("session_key_prefix") or "webui"
+            headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
         message_content: Any = str(msg_text or "")
         if attachments:
             try:
@@ -290,6 +607,8 @@ def _run_gateway_chat_streaming(
         }
         if model_provider:
             body["provider"] = model_provider
+        if selected_gateway and selected_gateway.get("remote_profile"):
+            body["profile"] = selected_gateway.get("remote_profile")
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
