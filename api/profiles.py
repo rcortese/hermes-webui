@@ -1886,7 +1886,11 @@ def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
         proxies = profile_proxy_public_entries(get_config())
     except Exception:
         proxies = []
-    merged = [*rows, *proxies]
+    # Remote profile proxies are cross-persona chat targets. Keep them at the
+    # top of the WebUI profile selector ("personas first"), then show local
+    # Moss profiles after them. profile_proxy_public_entries() already orders
+    # personas within the proxy group.
+    merged = [*proxies, *rows]
     return [{**p, 'is_active': p.get('name') == active} for p in merged]
 
 

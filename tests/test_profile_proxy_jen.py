@@ -75,7 +75,7 @@ def test_list_profiles_includes_remote_proxy(monkeypatch, tmp_path):
 
     names = {p["name"] for p in result}
     assert {"default", "jen", "denholm", "roy", "richmond", "the-elders"}.issubset(names)
-    assert [p["name"] for p in result[:6]] == ["default", "jen", "denholm", "roy", "richmond", "the-elders"]
+    assert [p["name"] for p in result[:6]] == ["jen", "denholm", "roy", "richmond", "the-elders", "default"]
     jen = next(p for p in result if p["name"] == "jen")
     assert jen["remote_proxy"] is True
     assert jen["base_url"] == "http://jen:8642"
@@ -144,3 +144,27 @@ def test_routes_proxy_resolution_uses_session_profile_before_active_fallback():
     assert "active_profile_name = get_active_profile_name()" in body
     assert "gateway_profile_proxy = profile_proxy_for(active_profile_name, cfg)" in body
     assert 'worker_kwargs["gateway_config"] = gateway_profile_proxy' in body
+
+
+def test_remote_profile_proxies_are_returned_before_local_profiles(monkeypatch):
+    import api.profiles as profiles
+
+    rows = [
+        {"name": "default", "is_active": True},
+        {"name": "coder", "is_active": False},
+    ]
+
+    def fake_entries(_config=None):
+        return [
+            {"name": "jen", "label": "Jen", "remote_proxy": True, "profile_kind": "remote_gateway_proxy"},
+            {"name": "denholm", "label": "Denholm", "remote_proxy": True, "profile_kind": "remote_gateway_proxy"},
+        ]
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.gateway_chat.profile_proxy_public_entries", fake_entries)
+
+    ordered = profiles._with_remote_profile_proxies(rows)
+
+    assert [p["name"] for p in ordered[:4]] == ["jen", "denholm", "default", "coder"]
+    assert ordered[2]["is_active"] is True
