@@ -101,6 +101,27 @@ def test_gateway_stream_usage_normalizes_token_names():
     assert _gateway_stream_usage({}) == {}
 
 
+def test_gateway_stream_usage_preserves_context_metadata():
+    assert _gateway_stream_usage({
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "last_prompt_tokens": 11,
+            "context_length": 200,
+            "threshold_tokens": 150,
+            "cache_read_tokens": 2,
+        }
+    }) == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "estimated_cost": 0,
+        "last_prompt_tokens": 11,
+        "context_length": 200,
+        "threshold_tokens": 150,
+        "cache_read_tokens": 2,
+    }
+
+
 def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
     assert _gateway_tool_progress_event(
         {

@@ -1325,8 +1325,8 @@ def test_context_details_live_in_mobile_overflow_panel():
     sync_end = ui_js.index("// ── Touch support", sync_start)
     sync_body = ui_js[sync_start:sync_end]
     for expected in (
-        "DEFAULT_CTX=128*1024",
         "hasExplicitCtx",
+        "hasMeasuredCtx",
         "hasPromptTok",
         "rawPct",
         "overflowed",
@@ -1336,6 +1336,13 @@ def test_context_details_live_in_mobile_overflow_panel():
     ):
         assert expected in sync_body, \
             f"_syncCtxIndicator must preserve upstream context logic while updating mobile context UI ({expected})"
+
+    for forbidden in (
+        "DEFAULT_CTX=128*1024",
+        "(est. 128K)",
+    ):
+        assert forbidden not in sync_body, \
+            f"_syncCtxIndicator must not render fake context percentages from fallback windows ({forbidden})"
 
     mobile_css = _composer_phone_media_block()
     ctx_wrap = _declarations(_rule_body(mobile_css, ".ctx-indicator-wrap"))
