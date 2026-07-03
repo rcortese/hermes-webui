@@ -233,22 +233,52 @@ def _gateway_sse_reasoning_delta(payload: dict) -> str:
         return ""
 
 
-def _gateway_stream_usage(payload: dict) -> dict:
+def _gateway_resolve_context_length(model: str | None, provider: str | None, *, base_url: str = "", api_key: str = "") -> int:
+    """Resolve a real context window for Gateway-backed Chat Completions usage."""
+    try:
+        from api.routes import _resolve_context_length_for_session_model
+
+        return int(_resolve_context_length_for_session_model(
+            model,
+            provider,
+            base_url=base_url,
+            api_key=api_key,
+        ) or 0)
+    except Exception:
+        logger.debug("Failed to resolve gateway context length", exc_info=True)
+        return 0
+
+
+def _gateway_stream_usage(payload: dict, *, context_length: int | None = None) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     normalized = {
-        "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+        "input_tokens": input_tokens,
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
-    # Preserve Hermes-native context metadata when the gateway includes it. The
-    # WebUI context ring is intentionally based on last_prompt_tokens /
-    # context_length, not cumulative input_tokens; dropping these fields in the
-    # API bridge makes the frontend fall back to guessed context windows.
+    # Preserve Hermes-native context metadata when the gateway includes it. For
+    # the OpenAI-compatible chat/completions bridge, prompt_tokens is the prompt
+    # occupancy for this request, so it is the correct last_prompt_tokens value
+    # when the gateway does not emit Hermes-native metadata separately.
+    if usage.get("last_prompt_tokens") is not None:
+        normalized["last_prompt_tokens"] = usage.get("last_prompt_tokens")
+    elif input_tokens > 0:
+        normalized["last_prompt_tokens"] = input_tokens
+
+    resolved_context_length = context_length
+    if usage.get("context_length") is not None:
+        resolved_context_length = usage.get("context_length")
+    try:
+        resolved_context_length = int(resolved_context_length or 0)
+    except (TypeError, ValueError):
+        resolved_context_length = 0
+    if resolved_context_length > 0:
+        normalized["context_length"] = resolved_context_length
+
     for key in (
-        "last_prompt_tokens",
-        "context_length",
         "threshold_tokens",
         "cache_read_tokens",
         "cache_write_tokens",
@@ -347,6 +377,12 @@ def _run_gateway_runs_api_streaming(
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
+    known_context_length = _gateway_resolve_context_length(
+        model,
+        body_extras.get("provider") if isinstance(body_extras, dict) else None,
+        base_url=base_url,
+        api_key=api_key,
+    )
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -504,7 +540,7 @@ def _run_gateway_runs_api_streaming(
                     final_text = output
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] = output
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
@@ -523,7 +559,7 @@ def _run_gateway_runs_api_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += delta
                 put_gateway_event("token", {"text": delta})
-            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
     return final_text, usage
 
 
@@ -683,6 +719,12 @@ def _run_gateway_chat_streaming(
         base_url = (selected_gateway or {}).get("base_url") or _gateway_base_url(cfg)
         api_key = (selected_gateway or {}).get("api_key") or _gateway_api_key()
         session_key_prefix = (selected_gateway or {}).get("session_key_prefix") or "webui"
+        known_context_length = _gateway_resolve_context_length(
+            model,
+            model_provider,
+            base_url=base_url,
+            api_key=api_key,
+        )
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -876,8 +918,8 @@ def _run_gateway_chat_streaming(
                         if stream_id in STREAM_PARTIAL_TEXT:
                             STREAM_PARTIAL_TEXT[stream_id] += delta
                         put_gateway_event("token", {"text": delta})
-                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-            usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+                    usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(last_payload, context_length=known_context_length).items() if v})
         assistant_text = final_text.strip()
         if not assistant_text:
             put_gateway_event("apperror", {
