@@ -1,4 +1,7 @@
 """Tests for self-update diagnostics (api/updates.py)."""
+import email.message
+import json
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 import api.updates as updates
@@ -157,6 +160,108 @@ def test_run_git_returns_stdout_when_no_stderr(tmp_path):
 
     assert ok is False
     assert 'Already up to date' in out
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode('utf-8')
+
+
+def test_gateway_health_probe_uses_webui_gateway_base_url_fallback(monkeypatch):
+    monkeypatch.delenv('GATEWAY_HEALTH_URL', raising=False)
+    monkeypatch.delenv('HERMES_GATEWAY_HEALTH_URL', raising=False)
+    monkeypatch.setenv('HERMES_WEBUI_GATEWAY_BASE_URL', 'http://roy:8645')
+
+    assert updates._gateway_health_base_url() == 'http://roy:8645'
+
+
+def test_gateway_health_probe_omits_authorization_without_key(monkeypatch):
+    monkeypatch.delenv('HERMES_WEBUI_GATEWAY_API_KEY', raising=False)
+    monkeypatch.delenv('API_SERVER_KEY', raising=False)
+    monkeypatch.setenv('HERMES_GATEWAY_HEALTH_URL', 'http://roy:8645')
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req)
+        return _FakeHTTPResponse({'version': '0.18.0'})
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates._detect_agent_version_from_gateway_health() == '0.18.0'
+    assert seen
+    assert seen[0].full_url == 'http://roy:8645/health'
+    assert seen[0].get_header('Authorization') is None
+
+
+def test_gateway_health_probe_uses_webui_gateway_key_precedence(monkeypatch):
+    monkeypatch.setenv('HERMES_GATEWAY_HEALTH_URL', 'http://roy:8645')
+    monkeypatch.setenv('HERMES_WEBUI_GATEWAY_API_KEY', 'webui-secret')
+    monkeypatch.setenv('API_SERVER_KEY', 'api-secret')
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req)
+        return _FakeHTTPResponse({'version': '0.18.0'})
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates._detect_agent_version_from_gateway_health() == '0.18.0'
+    assert seen[0].get_header('Authorization') == 'Bearer webui-secret'
+
+
+def test_gateway_health_probe_falls_back_to_api_server_key_for_detailed(monkeypatch):
+    monkeypatch.setenv('HERMES_GATEWAY_HEALTH_URL', 'http://roy:8645')
+    monkeypatch.delenv('HERMES_WEBUI_GATEWAY_API_KEY', raising=False)
+    monkeypatch.setenv('API_SERVER_KEY', 'api-secret')
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req)
+        if req.full_url.endswith('/health'):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                404,
+                'not found',
+                hdrs=email.message.Message(),
+                fp=None,
+            )
+        return _FakeHTTPResponse({'agent': {'version': '0.18.0'}})
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates._detect_agent_version_from_gateway_health() == '0.18.0'
+    assert [req.full_url for req in seen] == [
+        'http://roy:8645/health',
+        'http://roy:8645/health/detailed',
+    ]
+    assert seen[1].get_header('Authorization') == 'Bearer api-secret'
+
+
+def test_gateway_health_probe_uses_simple_health_when_available_even_with_wrong_key(monkeypatch):
+    monkeypatch.setenv('HERMES_GATEWAY_HEALTH_URL', 'http://roy:8645/health/detailed')
+    monkeypatch.setenv('API_SERVER_KEY', 'wrong-secret')
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req)
+        if req.full_url.endswith('/health/detailed'):
+            raise AssertionError('detailed health should not be called when /health has version')
+        return _FakeHTTPResponse({'version': '0.18.0'})
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates._detect_agent_version_from_gateway_health() == '0.18.0'
+    assert [req.full_url for req in seen] == ['http://roy:8645/health']
+    assert seen[0].get_header('Authorization') == 'Bearer wrong-secret'
 
 
 def test_run_git_returns_exit_code_when_no_output(tmp_path):

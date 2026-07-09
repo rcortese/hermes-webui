@@ -271,6 +271,7 @@ def _gateway_health_base_url() -> str:
     raw = (
         os.environ.get('GATEWAY_HEALTH_URL')
         or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_WEBUI_GATEWAY_BASE_URL')
         or 'http://hermes-agent:8642'
     ).strip()
     if raw.endswith('/health/detailed'):
@@ -278,6 +279,24 @@ def _gateway_health_base_url() -> str:
     elif raw.endswith('/health'):
         raw = raw[: -len('/health')]
     return raw.rstrip('/')
+
+
+def _gateway_health_api_key() -> str:
+    """Return the optional API key for authenticated gateway health probes."""
+    return str(
+        os.environ.get('HERMES_WEBUI_GATEWAY_API_KEY')
+        or os.environ.get('API_SERVER_KEY')
+        or ''
+    ).strip()
+
+
+def _gateway_health_request(url: str) -> urllib.request.Request:
+    """Build a gateway health request, adding Bearer auth when configured."""
+    headers = {}
+    api_key = _gateway_health_api_key()
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+    return urllib.request.Request(url, headers=headers, method='GET')
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
@@ -306,7 +325,8 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
         return None
     for path in ('/health', '/health/detailed'):
         try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
+            req = _gateway_health_request(f'{base}{path}')
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode('utf-8'))
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
             continue
