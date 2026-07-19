@@ -9144,10 +9144,18 @@ function _showAgentHealthAlert(payload){
   const banner=$('agentHealthBanner');
   const title=$('agentHealthTitle');
   const details=$('agentHealthDetails');
+  const restartBtn=$('btnRestartGateway');
   if(!banner) return;
-  if(title) title.textContent='Hermes agent is not responding';
-  const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
-  if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  const degraded=payload&&payload.alive===true&&payload.details&&payload.details.degraded===true;
+  if(restartBtn){restartBtn.hidden=!!degraded;restartBtn.disabled=!!degraded;}
+  if(degraded){
+    if(title) title.textContent='Gateway telemetry is degraded';
+    if(details) details.textContent='The gateway is reachable, but detailed telemetry is unavailable. Restart is disabled because reachability is healthy.';
+  }else{
+    if(title) title.textContent='Hermes agent is not responding';
+    const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
+    if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  }
   banner.hidden=false;
   banner.classList.add('visible');
 }
@@ -9186,6 +9194,11 @@ async function pollAgentHealth(){
   if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
+    if(payload.alive === true && payload.details && payload.details.degraded === true){
+      _agentHealthLastState='degraded';
+      _showAgentHealthAlert(payload);
+      return;
+    }
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);

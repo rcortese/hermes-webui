@@ -1,0 +1,140 @@
+"""Focused release-port contracts for The AI Crowd WebUI overlay."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+
+def _remote_env() -> dict[str, str]:
+    return {
+        "HERMES_WEBUI_PROFILE_PROXY_ROY_BASE_URL": "http://roy.invalid:8645",
+        "HERMES_WEBUI_PROFILE_PROXY_ROY_REMOTE_PROFILE": "roy-persona",
+        "HERMES_WEBUI_PROFILE_PROXY_ROY_SESSION_KEY_PREFIX": "webui:roy",
+    }
+
+
+def test_execution_targets_are_canonical_and_remote_is_fail_closed():
+    from api.gateway_chat import resolve_execution_target, webui_chat_backend_mode
+
+    assert webui_chat_backend_mode({}, {}) == "local-direct"
+    assert webui_chat_backend_mode({}, {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"}) == "local-direct"
+    remote = resolve_execution_target("ROY", local_gateway_enabled=False, environ={**_remote_env(), "HERMES_WEBUI_PROFILE_PROXY_ROY_API_KEY": "remote-test-key"}, profiles=[])
+    assert remote["ok"] is True
+    assert remote["execution_target"] == "remote_gateway"
+    assert remote["gateway_config"]["remote_profile"] == "roy-persona"
+    assert resolve_execution_target("missing", local_gateway_enabled=False, environ={}, profiles=[])["execution_target"] == "fail_closed"
+
+
+def test_remote_proxy_without_credential_fails_closed():
+    from api.gateway_chat import resolve_execution_target
+
+    assert resolve_execution_target("roy", local_gateway_enabled=False, environ=_remote_env(), profiles=[]) == {
+        "ok": False, "_status": 503, "error_type": "remote_profile_auth_unconfigured",
+        "execution_target": "fail_closed", "error": "selected remote profile has no configured gateway credential",
+    }
+
+
+def test_remote_local_homonym_is_rejected_case_insensitively():
+    from api.gateway_chat import resolve_execution_target
+
+    result = resolve_execution_target("roy", local_gateway_enabled=False, environ={**_remote_env(), "HERMES_WEBUI_PROFILE_PROXY_ROY_API_KEY": "remote-test-key"}, profiles=[{"name": "Roy"}])
+    assert result == {
+        "ok": False, "_status": 409, "error_type": "ambiguous_profile",
+        "execution_target": "fail_closed", "error": "selected profile is both local and remote",
+    }
+
+
+def test_public_proxy_selector_never_contains_secret_or_path():
+    from api.profile_proxy import profile_proxy_public_entries
+
+    env = {**_remote_env(), "HERMES_WEBUI_PROFILE_PROXY_ROY_API_KEY": "not-a-real-secret"}
+    row = profile_proxy_public_entries({}, env)[0]
+    assert row["backend"] == "remote_gateway"
+    assert row["base_url_host_only"] == "roy.invalid:8645"
+    assert "api_key" not in row
+    assert "base_url" not in row
+
+
+def test_proxy_urls_reject_userinfo_invalid_ports_and_non_http_schemes():
+    from api.profile_proxy import profile_proxy_entries
+
+    for value in ("ftp://roy.invalid", "http://user:pass@roy.invalid", "https://roy.invalid:99999", "http:///missing-host", "https://roy.invalid/?query=1"):
+        assert profile_proxy_entries({}, {"HERMES_WEBUI_PROFILE_PROXY_ROY_BASE_URL": value}) == {}
+
+
+def test_remote_health_basic_fallback_is_explicitly_degraded(monkeypatch):
+    from api import agent_health
+
+    agent_health._reset_remote_probe_cache_for_tests()
+    monkeypatch.setattr(agent_health, "_http_probe", lambda url, timeout, api_key=None: (url.endswith("/health"), 200, None, b'{"status":"ok"}'))
+    payload = agent_health._probe_remote_gateway("http://gateway.invalid", now=1.0)
+    assert payload["alive"] is True
+    assert payload["details"]["telemetry_state"] == "basic_fallback"
+    assert payload["details"]["degraded"] is True
+
+
+def test_health_bearer_is_unredirected(monkeypatch):
+    from api import agent_health
+
+    captured = {}
+    class Response:
+        status = 200
+        def getcode(self): return 200
+        def read(self, _limit): return b"{}"
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+    def urlopen(request, timeout):
+        captured.update(request.unredirected_hdrs)
+        return Response()
+    monkeypatch.setattr(agent_health.urllib_request, "urlopen", urlopen)
+    assert agent_health._http_probe("http://gateway.invalid/health/detailed", 1, api_key="test-token")[0]
+    assert captured["Authorization"] == "Bearer test-token"
+
+
+def test_terminal_checkpointed_user_does_not_become_no_response():
+    from api import streaming
+
+    previous = [{"role": "user", "content": "follow up"}]
+    merged = [*previous, {"role": "assistant", "content": "done"}]
+    assert streaming._turn_transcript_lacks_final_assistant_answer(merged, previous, "follow up", source="webui") is False
+
+
+def test_service_launcher_is_fail_closed_and_has_no_generic_surface(monkeypatch):
+    import api.service_session_launch as launch
+
+    monkeypatch.setenv(launch.TOKEN_ENV, "x" * 32)
+    handler = SimpleNamespace(headers={launch.HEADER: "x" * 32})
+    assert launch._authorized(handler)
+    assert launch._validate_body({"profile": "moss", "workspace": "/tmp", "initial_prompt": "hi", "url": "http://bad"}) == (None, "unsupported field")
+    assert launch.is_service_launch_path("/api/internal/session-launch")
+    assert not launch.is_service_launch_path("/api/chat/start")
+
+
+def test_service_launcher_persists_then_verifies_the_exact_stream(monkeypatch):
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+    import api.service_session_launch as launch
+    import api.workspace as workspace
+
+    class Session:
+        session_id = "session-1"
+        active_stream_id = "stream-1"
+        saved = False
+        def save(self): self.saved = True
+
+    session = Session()
+    responses = []
+    monkeypatch.setenv(launch.TOKEN_ENV, "x" * 32)
+    monkeypatch.setattr(launch, "_profile_exists", lambda _profile: True)
+    monkeypatch.setattr(workspace, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda model, provider: (model, provider))
+    monkeypatch.setattr(models, "new_session", lambda **_kwargs: session)
+    monkeypatch.setattr(models, "get_session", lambda sid: session if sid == session.session_id else (_ for _ in ()).throw(KeyError(sid)))
+    monkeypatch.setattr(routes, "start_session_turn", lambda *args, **kwargs: {"stream_id": "stream-1", "_status": 200})
+    monkeypatch.setattr(config, "STREAMS", {"stream-1": object()})
+    monkeypatch.setattr(launch, "j", lambda _handler, payload, status=200: responses.append((status, payload)))
+
+    handler = SimpleNamespace(headers={launch.HEADER: "x" * 32})
+    assert launch.handle_service_session_launch(handler, {"profile": "moss", "workspace": "/tmp/work", "model": "provider/model", "initial_prompt": "start"})
+    assert session.saved is True
+    assert responses == [(201, {"session_id": "session-1", "stream_id": "stream-1", "verified_state": {"session_id": "session-1", "stream_id": "stream-1", "active": True}, "profile": "moss", "workspace": "/tmp/work", "model": "provider/model", "reasoning": "profile_default"})]

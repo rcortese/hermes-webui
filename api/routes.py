@@ -5309,6 +5309,9 @@ def apply_cors_preflight_headers(handler) -> None:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
+    from api.service_session_launch import is_service_launch_path
+    if is_service_launch_path(path):
+        return True  # independently bearer-authorized; never browser-cookie authority
     return path in {
         "/api/auth/login",
         "/api/auth/passkey/options",
@@ -13716,6 +13719,10 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    if parsed.path == "/api/internal/session-launch":
+        from api.service_session_launch import handle_service_session_launch
+        return handle_service_session_launch(handler, body)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 
@@ -20754,6 +20761,25 @@ def _start_chat_stream_for_session(
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
+    # Resolve ownership before persisting pending state. An unconfigured remote
+    # selection must fail closed without creating a local fallback turn.
+    from api.gateway_chat import _gateway_api_key, _gateway_base_url, resolve_execution_target
+    from api.profiles import get_active_profile_name, list_profiles_api
+    selected_profile = getattr(s, "profile", None) or get_active_profile_name()
+    cfg = get_config()
+    execution_target = resolve_execution_target(
+        selected_profile,
+        local_gateway_enabled=webui_gateway_chat_enabled(cfg),
+        config_data=cfg,
+        profiles=list_profiles_api(include_remote=False),
+        local_gateway_config={
+            "base_url": _gateway_base_url(cfg),
+            "api_key": _gateway_api_key(),
+            "session_key_prefix": "webui",
+        },
+    )
+    if not execution_target.get("ok"):
+        return {"error": execution_target.get("error", "chat target unavailable"), "error_type": execution_target.get("error_type"), "_status": execution_target.get("_status", 404)}
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
     # duplicated clarify cards for what appears to be a single user request.
@@ -20871,9 +20897,11 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
+    backend_is_gateway = execution_target["execution_target"] in {"remote_gateway", "local_gateway"}
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if backend_is_gateway and execution_target.get("gateway_config") is not None:
+        worker_kwargs["gateway_config"] = execution_target["gateway_config"]
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(

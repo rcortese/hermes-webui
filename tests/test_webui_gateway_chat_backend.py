@@ -30,7 +30,7 @@ def test_gateway_chat_backend_is_default_off_for_truthy_values():
         env = {}
         if value is not None:
             env["HERMES_WEBUI_CHAT_BACKEND"] = value
-        assert webui_chat_backend_mode({}, env) == "legacy"
+        assert webui_chat_backend_mode({}, env) == "local-direct"
         assert webui_gateway_chat_enabled({}, env) is False
 
 
@@ -78,7 +78,7 @@ def test_gateway_chat_backend_env_wins_over_config_and_stays_safe():
     assert webui_chat_backend_mode(
         {"webui_chat_backend": "gateway"},
         {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"},
-    ) == "legacy"
+    ) == "local-direct"
 
 
 def test_gateway_sse_delta_extracts_openai_chat_chunks():

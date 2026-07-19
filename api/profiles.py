@@ -1921,7 +1921,21 @@ def _build_profile_rows_fast() -> list | None:
     return rows
 
 
-def list_profiles_api() -> list:
+def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
+    """Suppress local homonyms and append canonical remote selector targets."""
+    try:
+        from api.config import get_config
+        from api.profile_proxy import profile_name_key, profile_proxy_public_entries
+        proxies = profile_proxy_public_entries(get_config())
+    except Exception:
+        return rows
+    proxy_names = {profile_name_key(row.get("name")) for row in proxies}
+    local_rows = [row for row in rows if profile_name_key(row.get("name")) not in proxy_names]
+    active = get_active_profile_name()
+    return [{**row, "is_active": profile_name_key(row.get("name")) == profile_name_key(active)} for row in [*proxies, *local_rows]]
+
+
+def list_profiles_api(*, include_remote: bool = True) -> list:
     """List all profiles with metadata, serialized for JSON response.
 
     In isolated profile mode (HERMES_HOME points to ~/.hermes/profiles/<name>),
@@ -2037,7 +2051,8 @@ def list_profiles_api() -> list:
         return result
 
     active = get_active_profile_name()
-    return [{**p, 'is_active': p['name'] == active} for p in rows]
+    local_rows = [{**p, 'is_active': p['name'] == active} for p in rows]
+    return _with_remote_profile_proxies(local_rows) if include_remote else local_rows
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:

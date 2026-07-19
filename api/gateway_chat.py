@@ -43,6 +43,16 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+_LOCAL_DIRECT_BACKEND_ALIASES = {"local-direct", "legacy-direct"}
+
+
+# Re-export these configuration helpers at the established gateway boundary.
+from api.profile_proxy import (
+    profile_proxy_entries,
+    profile_proxy_for,
+    profile_proxy_public_entries,
+    resolve_execution_target,
+)
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -140,7 +150,11 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     ).strip().lower()
     if raw in _GATEWAY_CHAT_BACKENDS:
         return "gateway"
-    return "legacy"
+    # `local-direct` is the canonical emitted value. `legacy-direct` remains
+    # accepted only as a deprecated input alias for existing deployments.
+    if raw in _LOCAL_DIRECT_BACKEND_ALIASES:
+        return "local-direct"
+    return "local-direct"
 
 
 def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
@@ -643,6 +657,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    gateway_config=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -760,8 +775,14 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        gateway_config_supplied = isinstance(gateway_config, dict)
+        selected_gateway = gateway_config if gateway_config_supplied else {}
+        base_url = str(selected_gateway.get("base_url") or _gateway_base_url(cfg)).rstrip("/")
+        # A supplied target is authoritative: never leak the local key to a
+        # remote target merely because its own credential is absent.
+        api_key = str(selected_gateway.get("api_key") or "").strip() if gateway_config_supplied else _gateway_api_key()
+        session_key_prefix = str(selected_gateway.get("session_key_prefix") or "webui").strip() or "webui"
+        remote_profile = str(selected_gateway.get("remote_profile") or "").strip()
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -781,6 +802,8 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            if remote_profile:
+                body_extras["profile"] = remote_profile
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -835,7 +858,7 @@ def _run_gateway_chat_streaming(
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:
@@ -856,6 +879,8 @@ def _run_gateway_chat_streaming(
                 body["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
+            if remote_profile:
+                body["profile"] = remote_profile
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),

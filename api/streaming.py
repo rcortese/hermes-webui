@@ -5667,7 +5667,13 @@ def _turn_transcript_lacks_final_assistant_answer(
     merged_messages = list(merged_messages or [])
     previous_display = list(previous_display or [])
     current_user_idx = _find_current_user_turn(merged_messages, msg_text)
-    if current_user_idx is None or current_user_idx < len(previous_display):
+    checkpointed_current_user = bool(
+        current_user_idx is not None
+        and current_user_idx == len(previous_display) - 1
+        and previous_display
+        and _message_identity(merged_messages[current_user_idx]) == _message_identity(previous_display[-1])
+    )
+    if current_user_idx is None or (current_user_idx < len(previous_display) and not checkpointed_current_user):
         # The active turn lives after the durable transcript boundary. If the
         # merged display only exposes an older user row, materialize the pending
         # prompt so a replayed assistant row cannot satisfy the wrong turn.
