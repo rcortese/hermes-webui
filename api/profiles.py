@@ -1935,6 +1935,37 @@ def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
     return [{**row, "is_active": profile_name_key(row.get("name")) == profile_name_key(active)} for row in [*proxies, *local_rows]]
 
 
+def remote_profile_selector(name: str) -> dict | None:
+    """Return safe remote-selector metadata, never a local profile home."""
+    try:
+        from api.profile_proxy import profile_name_key, profile_proxy_for
+
+        proxy = profile_proxy_for(name)
+        if not proxy:
+            return None
+        key = profile_name_key(name)
+        local_rows = list_profiles_api(include_remote=False)
+        if any(profile_name_key(row.get("name")) == key for row in local_rows):
+            return None
+        selector_name = str(proxy.get("name") or "").strip()
+        if not selector_name:
+            return None
+        return {
+            "name": selector_name,
+            "profiles": list_profiles_api(),
+            "active": selector_name,
+            "is_default": False,
+            "default_model": str(proxy.get("remote_profile") or selector_name),
+            "default_model_provider": "remote-gateway",
+            "default_workspace": None,
+            "remote_proxy": True,
+            "profile_kind": "remote_gateway_proxy",
+        }
+    except Exception:
+        logger.debug("Failed to resolve remote profile selector", exc_info=True)
+        return None
+
+
 def list_profiles_api(*, include_remote: bool = True) -> list:
     """List all profiles with metadata, serialized for JSON response.
 

@@ -15253,9 +15253,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.auth import ensure_trusted_auth_session
-            from api.profiles import switch_profile, _validate_profile_name
+            from api.profiles import remote_profile_selector, switch_profile, _validate_profile_name
+            from api.profile_proxy import profile_proxy_for
             from api.helpers import build_profile_cookie
-            if name != 'default':
+            remote = remote_profile_selector(name)
+            if profile_proxy_for(name) and remote is None:
+                return bad(handler, "selected profile is both local and remote", 409)
+            if remote is not None:
+                name = remote["active"]
+            elif name != 'default':
                 _validate_profile_name(name)
             session_info = ensure_trusted_auth_session(handler)
             if getattr(handler, '_trusted_auth_session_rejected', False):
@@ -15263,19 +15269,26 @@ def handle_post(handler, parsed) -> bool:
             bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
             if bound_profile and name != bound_profile:
                 return bad(handler, "Profile is bound to the current session", 403)
-            # process_wide=False: don't mutate the process-global _active_profile.
-            # Per-client profile is managed via cookie + thread-local (#798).
-            result = switch_profile(name, process_wide=False)
+            # Remote selectors are opaque routing identities, never local
+            # profile homes. switch_profile() is exclusively for trusted local
+            # directories; collisions above already failed closed.
+            if remote is not None:
+                result = remote
+            else:
+                # process_wide=False: don't mutate the process-global _active_profile.
+                # Per-client profile is managed via cookie + thread-local (#798).
+                result = switch_profile(name, process_wide=False)
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
             from api.config import invalidate_models_cache
             invalidate_models_cache()
-            try:
-                from api.gateway_watcher import restart_watcher_for_profile
-                restart_watcher_for_profile(name)
-            except Exception as exc:
-                logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            if remote is None:
+                try:
+                    from api.gateway_watcher import restart_watcher_for_profile
+                    restart_watcher_for_profile(name)
+                except Exception as exc:
+                    logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
             session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
             if session_cookie_value:
                 if bound_profile and name == bound_profile:

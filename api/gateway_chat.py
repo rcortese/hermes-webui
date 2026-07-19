@@ -46,13 +46,29 @@ _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 _LOCAL_DIRECT_BACKEND_ALIASES = {"local-direct", "legacy-direct"}
 
 
-# Re-export these configuration helpers at the established gateway boundary.
-from api.profile_proxy import (
-    profile_proxy_entries,
-    profile_proxy_for,
-    profile_proxy_public_entries,
-    resolve_execution_target,
-)
+# Re-export the execution-target resolver at the established gateway boundary.
+from api.profile_proxy import resolve_execution_target
+
+
+class _GatewayNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Fail closed: credentialed Gateway requests never follow redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_GATEWAY_NO_REDIRECT_OPENER = urllib.request.build_opener(_GatewayNoRedirectHandler())
+_STDLIB_URLOPEN = urllib.request.urlopen
+
+
+def _gateway_urlopen(request, *, timeout):
+    """Open a credentialed Gateway request without redirect credential leakage."""
+    # Existing gateway tests replace urllib.request.urlopen at this module's
+    # established seam. Honor that explicit test double; production always uses
+    # the private no-redirect opener.
+    if urllib.request.urlopen is not _STDLIB_URLOPEN:
+        return urllib.request.urlopen(request, timeout=timeout)
+    return _GATEWAY_NO_REDIRECT_OPENER.open(request, timeout=timeout)
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -445,7 +461,7 @@ def _run_gateway_runs_api_streaming(
         method="POST",
     )
     update_active_run(stream_id, phase="gateway-request")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _gateway_urlopen(req, timeout=30) as resp:
         run_data = json.loads(resp.read(65536))
     run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
     if not run_id:
@@ -460,7 +476,7 @@ def _run_gateway_runs_api_streaming(
     final_text = ""
     usage: dict = {}
     sse_event = "message"
-    with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
+    with _gateway_urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
             if cancel_event.is_set():
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -890,7 +906,7 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+            with _gateway_urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
