@@ -34,6 +34,8 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from api.http import credentialed_urlopen
+
 _GATEWAY_PID_FILE = "gateway.pid"
 _GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
 
@@ -547,7 +549,7 @@ def _http_probe(
         # Never forward a gateway credential when urllib follows a redirect.
         req.add_unredirected_header("Authorization", f"Bearer {api_key}")
     try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
+        with credentialed_urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
             status = getattr(resp, "status", None) or resp.getcode()
             ok = 200 <= int(status) < 300
             # Cap the body read: we only need a small JSON health payload, and an
