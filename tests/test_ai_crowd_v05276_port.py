@@ -43,6 +43,63 @@ def test_remote_local_homonym_is_rejected_case_insensitively():
     }
 
 
+def test_profile_selector_uses_canonical_order_and_preserves_active_state(monkeypatch):
+    from api import config, profiles
+
+    proxies = [
+        {"name": "Zed", "remote_proxy": True, "is_active": False},
+        {"name": "alpha", "remote_proxy": True, "is_active": False},
+    ]
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr("api.profile_proxy.profile_proxy_public_entries", lambda _config: proxies)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "moss")
+
+    rows = profiles._with_remote_profile_proxies([
+        {"name": "zulu", "is_active": False},
+        {"name": "default", "is_active": False},
+        {"name": "moss", "is_active": False},
+        {"name": "bravo", "is_active": False},
+    ])
+
+    assert [row["name"] for row in rows] == ["moss", "alpha", "Zed", "default", "bravo", "zulu"]
+    assert [row["is_active"] for row in rows] == [True, False, False, False, False, False]
+
+
+def test_profile_selector_suppresses_local_proxy_homonyms_case_insensitively(monkeypatch):
+    from api import config, profiles
+
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(
+        "api.profile_proxy.profile_proxy_public_entries",
+        lambda _config: [{"name": "RoY", "remote_proxy": True, "is_active": False}],
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    rows = profiles._with_remote_profile_proxies([
+        {"name": "roy", "is_active": True},
+        {"name": "other", "is_active": False},
+    ])
+
+    assert [row["name"] for row in rows] == ["RoY", "other"]
+    assert sum(row["name"].casefold() == "roy" for row in rows) == 1
+
+
+def test_profile_selector_handles_missing_moss_and_default(monkeypatch):
+    from api import config, profiles
+
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr("api.profile_proxy.profile_proxy_public_entries", lambda _config: [])
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "gamma")
+
+    rows = profiles._with_remote_profile_proxies([
+        {"name": "Zulu", "is_active": False},
+        {"name": "gamma", "is_active": False},
+    ])
+
+    assert [row["name"] for row in rows] == ["gamma", "Zulu"]
+    assert [row["is_active"] for row in rows] == [True, False]
+
+
 def test_public_proxy_selector_never_contains_secret_or_path():
     from api.profile_proxy import profile_proxy_public_entries
 
