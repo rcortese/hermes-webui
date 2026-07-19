@@ -13660,7 +13660,7 @@ def handle_post(handler, parsed) -> bool:
     # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _csrf_exempt_path(parsed.path, "POST") and not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
