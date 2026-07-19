@@ -5307,10 +5307,10 @@ def apply_cors_preflight_headers(handler) -> None:
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 
-def _csrf_exempt_path(path: str) -> bool:
+def _csrf_exempt_path(path: str, method: str = "POST") -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
     from api.service_session_launch import is_service_launch_path
-    if is_service_launch_path(path):
+    if is_service_launch_path(path) and method == "POST":
         return True  # independently bearer-authorized; never browser-cookie authority
     return path in {
         "/api/auth/login",
@@ -13660,7 +13660,7 @@ def handle_post(handler, parsed) -> bool:
     # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path, "POST") and not _check_csrf(handler):
         try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:

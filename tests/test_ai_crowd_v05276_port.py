@@ -166,6 +166,41 @@ def test_service_launcher_is_fail_closed_and_has_no_generic_surface(monkeypatch)
     assert not launch.is_service_launch_path("/api/chat/start")
 
 
+def test_service_launch_auth_bypass_is_post_only_and_exact(monkeypatch):
+    import server
+
+    calls = []
+    monkeypatch.setattr(server, "check_auth", lambda _handler, _parsed: calls.append(True) or True)
+
+    def fake_route(_handler, _parsed):
+        return True
+
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        handler = server.Handler.__new__(server.Handler)
+        handler.command = method
+        handler.path = "/api/internal/session-launch"
+        handler.headers = {}
+        handler.client_address = ("127.0.0.1", 0)
+        server.Handler._handle_write(handler, fake_route)
+    handler = server.Handler.__new__(server.Handler)
+    handler.command = "POST"
+    handler.path = "/api/internal/session-launch/nearby"
+    handler.headers = {}
+    handler.client_address = ("127.0.0.1", 0)
+    server.Handler._handle_write(handler, fake_route)
+
+    assert len(calls) == 4
+
+
+def test_service_launch_csrf_exemption_is_post_only_and_exact():
+    from api import routes
+
+    assert routes._csrf_exempt_path("/api/internal/session-launch", "POST") is True
+    for method in ("GET", "HEAD", "PUT", "PATCH", "DELETE"):
+        assert routes._csrf_exempt_path("/api/internal/session-launch", method) is False
+    assert routes._csrf_exempt_path("/api/internal/session-launch/nearby", "POST") is False
+
+
 def test_service_launcher_persists_then_verifies_the_exact_stream(monkeypatch):
     import api.config as config
     import api.models as models
