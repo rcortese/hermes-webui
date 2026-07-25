@@ -300,11 +300,27 @@ def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
+    normalized = {
         "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    # Preserve Hermes-native context metadata when the gateway includes it. The
+    # WebUI context ring is intentionally based on last_prompt_tokens /
+    # context_length, not cumulative input_tokens; dropping these fields in the
+    # API bridge makes the frontend fall back to guessed context windows.
+    for key in (
+        "last_prompt_tokens",
+        "context_length",
+        "threshold_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_hit_percent",
+        "turn_cache_hit_percent",
+    ):
+        if usage.get(key) is not None:
+            normalized[key] = usage.get(key)
+    return normalized
 
 
 def _gateway_reasoning_delta(payload: dict) -> str:

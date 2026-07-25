@@ -6177,17 +6177,17 @@ function _syncMobileCtxDisplay(state){
     }
     return;
   }
-  (function updateCtxRing(pct) {
+  (function updateCtxRing(pct, measured) {
     var arc = document.getElementById('ctx-arc');
     var num = document.getElementById('ctx-num');
     if (!arc || !num) return;
     var offset = 87.96 * (1 - Math.min(pct, 100) / 100);
     arc.setAttribute('stroke-dashoffset', offset);
-    num.textContent = Math.round(pct);
+    num.textContent = measured ? Math.round(pct) : '\u00b7';
     arc.setAttribute('stroke',
       pct <= 50 ? '#22c55e' : pct <= 85 ? '#f97316' : '#ef4444'
     );
-  })(state.pct);
+  })(state.pct, state.hasMeasuredCtx);
   if(mobileConfigBtn){
     mobileConfigBtn.setAttribute('aria-label',`${_MOBILE_CONFIG_BASE_LABEL}; ${state.label}`);
     mobileConfigBtn.setAttribute('title',`${_MOBILE_CONFIG_BASE_LABEL} \u00b7 ${state.label}`);
@@ -6272,9 +6272,8 @@ function _syncCtxIndicator(usage){
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
   const cacheReadTok=usage.cache_read_tokens||0;
   const cacheWriteTok=usage.cache_write_tokens||0;
-  // Default context window to 128K when not provided by backend
-  const DEFAULT_CTX=128*1024;
-  const ctxWindow=usage.context_length||DEFAULT_CTX;
+  const hasExplicitCtx=Number(usage.context_length)>0;
+  const ctxWindow=hasExplicitCtx?Number(usage.context_length):0;
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
   if(!promptTok&&!totalTok&&!cost&&!cacheReadTok&&!cacheWriteTok){
@@ -6290,7 +6289,8 @@ function _syncCtxIndicator(usage){
   }
   let hasPromptTok=!!promptTok;
   if(hasPostCompressionEstimate) hasPromptTok=true;
-  const rawPct=hasPromptTok?Math.round((contextPromptTok/ctxWindow)*100):0;
+  const hasMeasuredCtx=hasPromptTok&&hasExplicitCtx;
+  const rawPct=hasMeasuredCtx?Math.round((contextPromptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);
   const overflowed=rawPct>100;
   const ring=$('ctxRingValue');
@@ -6304,8 +6304,7 @@ function _syncCtxIndicator(usage){
     ring.style.strokeDasharray=String(circumference);
     ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(center) center.textContent=hasPromptTok?String(pct):'\u00b7';
-  const hasExplicitCtx=!!usage.context_length;
+  if(center) center.textContent=hasMeasuredCtx?String(pct):'\u00b7';
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
   // ── Compress affordance (#524) ──
@@ -6319,13 +6318,12 @@ function _syncCtxIndicator(usage){
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
   const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
-  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
-  if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
+  let label=hasMeasuredCtx?`${contextLabel} ${pct}% used`:(hasPromptTok?`${_fmtTokens(contextPromptTok)} prompt tokens used (context window unknown)`:`${_fmtTokens(totalTok)} tokens used`);
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasMeasuredCtx?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):(hasPromptTok?`Context window unknown`:`${_fmtTokens(totalTok)} tokens used`);
+  const tokensText=hasMeasuredCtx?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:(hasPromptTok?`${_fmtTokens(contextPromptTok)} prompt tokens used; context window unknown`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`);
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
@@ -6359,6 +6357,7 @@ function _syncCtxIndicator(usage){
   _syncMobileCtxDisplay({
     visible:true,
     hasPromptTok,
+    hasMeasuredCtx,
     pct,
     label,
     usageText,
