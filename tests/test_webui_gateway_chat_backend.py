@@ -14,6 +14,7 @@ from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
     _gateway_reasoning_delta,
+    _gateway_resolve_context_length,
     _gateway_sse_delta,
     _gateway_sse_reasoning_delta,
     _gateway_stream_usage,
@@ -30,7 +31,7 @@ def test_gateway_chat_backend_is_default_off_for_truthy_values():
         env = {}
         if value is not None:
             env["HERMES_WEBUI_CHAT_BACKEND"] = value
-        assert webui_chat_backend_mode({}, env) == "legacy"
+        assert webui_chat_backend_mode({}, env) == "local-direct"
         assert webui_gateway_chat_enabled({}, env) is False
 
 
@@ -78,7 +79,7 @@ def test_gateway_chat_backend_env_wins_over_config_and_stays_safe():
     assert webui_chat_backend_mode(
         {"webui_chat_backend": "gateway"},
         {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"},
-    ) == "legacy"
+    ) == "local-direct"
 
 
 def test_gateway_sse_delta_extracts_openai_chat_chunks():
@@ -88,17 +89,70 @@ def test_gateway_sse_delta_extracts_openai_chat_chunks():
 
 
 def test_gateway_stream_usage_normalizes_token_names():
-    assert _gateway_stream_usage({"usage": {"prompt_tokens": 7, "completion_tokens": 3}}) == {
+    assert _gateway_stream_usage({"usage": {"prompt_tokens": 7, "completion_tokens": 3}}, context_length=1000) == {
         "input_tokens": 7,
         "output_tokens": 3,
         "estimated_cost": 0,
+        "last_prompt_tokens": 7,
+        "context_length": 1000,
     }
-    assert _gateway_stream_usage({"usage": {"input_tokens": 5, "output_tokens": 2, "estimated_cost_usd": 0.01}}) == {
+    assert _gateway_stream_usage({"usage": {"input_tokens": 5, "output_tokens": 2, "estimated_cost_usd": 0.01}}, context_length=2000) == {
         "input_tokens": 5,
         "output_tokens": 2,
         "estimated_cost": 0.01,
+        "last_prompt_tokens": 5,
+        "context_length": 2000,
     }
     assert _gateway_stream_usage({}) == {}
+
+
+def test_gateway_stream_usage_preserves_context_metadata():
+    assert _gateway_stream_usage({
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "last_prompt_tokens": 11,
+            "context_length": 200,
+            "threshold_tokens": 150,
+            "cache_read_tokens": 2,
+        }
+    }, context_length=999) == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "estimated_cost": 0,
+        "last_prompt_tokens": 11,
+        "context_length": 200,
+        "threshold_tokens": 150,
+        "cache_read_tokens": 2,
+    }
+
+
+def test_gateway_resolve_context_length_uses_shared_route_resolver(monkeypatch):
+    calls = []
+
+    def fake_resolver(model, provider=None, *, base_url=None, api_key=None):
+        calls.append({
+            "model": model,
+            "provider": provider,
+            "base_url": base_url,
+            "api_key": api_key,
+        })
+        return 123456
+
+    monkeypatch.setattr("api.routes._resolve_context_length_for_session_model", fake_resolver)
+
+    assert _gateway_resolve_context_length(
+        "test-model",
+        "test-provider",
+        base_url="http://gateway.local",
+        api_key="secret-token",
+    ) == 123456
+    assert calls == [{
+        "model": "test-model",
+        "provider": "test-provider",
+        "base_url": "http://gateway.local",
+        "api_key": "secret-token",
+    }]
 
 
 def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
@@ -316,6 +370,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]) + [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_gateway_resolve_context_length", lambda *args, **kwargs: 4096)
 
     s = new_session()
     stream_id = "stream-gateway-test"
@@ -393,6 +448,11 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+    done_events = [data for event, data in event_pairs if event == "done"]
+    assert done_events
+    assert done_events[-1]["usage"]["input_tokens"] == 4
+    assert done_events[-1]["usage"]["last_prompt_tokens"] == 4
+    assert done_events[-1]["usage"]["context_length"] == 4096
 
 
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):

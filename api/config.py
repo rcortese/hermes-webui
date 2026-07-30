@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api.http import credentialed_urlopen
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
@@ -8844,7 +8845,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(f"{base_url}/v1/capabilities", headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with credentialed_urlopen(req, timeout=3) as resp:
             caps["capabilities_reachable"] = True
             body = json.loads(resp.read(65536))
         features = body.get("features") if isinstance(body, dict) else {}

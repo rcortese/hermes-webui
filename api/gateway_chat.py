@@ -43,6 +43,32 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+_LOCAL_DIRECT_BACKEND_ALIASES = {"local-direct", "legacy-direct"}
+
+
+# Re-export the execution-target resolver at the established gateway boundary.
+from api.profile_proxy import resolve_execution_target
+
+
+class _GatewayNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Fail closed: credentialed Gateway requests never follow redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_GATEWAY_NO_REDIRECT_OPENER = urllib.request.build_opener(_GatewayNoRedirectHandler())
+_STDLIB_URLOPEN = urllib.request.urlopen
+
+
+def _gateway_urlopen(request, *, timeout):
+    """Open a credentialed Gateway request without redirect credential leakage."""
+    # Existing gateway tests replace urllib.request.urlopen at this module's
+    # established seam. Honor that explicit test double; production always uses
+    # the private no-redirect opener.
+    if urllib.request.urlopen is not _STDLIB_URLOPEN:
+        return urllib.request.urlopen(request, timeout=timeout)
+    return _GATEWAY_NO_REDIRECT_OPENER.open(request, timeout=timeout)
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -140,7 +166,11 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     ).strip().lower()
     if raw in _GATEWAY_CHAT_BACKENDS:
         return "gateway"
-    return "legacy"
+    # `local-direct` is the canonical emitted value. `legacy-direct` remains
+    # accepted only as a deprecated input alias for existing deployments.
+    if raw in _LOCAL_DIRECT_BACKEND_ALIASES:
+        return "local-direct"
+    return "local-direct"
 
 
 def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
@@ -266,15 +296,61 @@ def _gateway_sse_reasoning_delta(payload: dict) -> str:
         return ""
 
 
-def _gateway_stream_usage(payload: dict) -> dict:
+def _gateway_resolve_context_length(model: str | None, provider: str | None, *, base_url: str = "", api_key: str = "") -> int:
+    """Resolve a real context window for Gateway-backed Chat Completions usage."""
+    try:
+        from api.routes import _resolve_context_length_for_session_model
+
+        return int(_resolve_context_length_for_session_model(
+            model,
+            provider,
+            base_url=base_url,
+            api_key=api_key,
+        ) or 0)
+    except Exception:
+        logger.debug("Failed to resolve gateway context length", exc_info=True)
+        return 0
+
+
+def _gateway_stream_usage(payload: dict, *, context_length: int | None = None) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
-        "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    normalized = {
+        "input_tokens": input_tokens,
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    # Preserve Hermes-native context metadata when the gateway includes it. For
+    # the OpenAI-compatible chat/completions bridge, prompt_tokens is the prompt
+    # occupancy for this request, so it is the correct last_prompt_tokens value
+    # when the gateway does not emit Hermes-native metadata separately.
+    if usage.get("last_prompt_tokens") is not None:
+        normalized["last_prompt_tokens"] = usage.get("last_prompt_tokens")
+    elif input_tokens > 0:
+        normalized["last_prompt_tokens"] = input_tokens
+
+    resolved_context_length = context_length
+    if usage.get("context_length") is not None:
+        resolved_context_length = usage.get("context_length")
+    try:
+        resolved_context_length = int(resolved_context_length or 0)
+    except (TypeError, ValueError):
+        resolved_context_length = 0
+    if resolved_context_length > 0:
+        normalized["context_length"] = resolved_context_length
+
+    for key in (
+        "threshold_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_hit_percent",
+        "turn_cache_hit_percent",
+    ):
+        if usage.get(key) is not None:
+            normalized[key] = usage.get(key)
+    return normalized
 
 
 def _gateway_reasoning_delta(payload: dict) -> str:
@@ -366,6 +442,12 @@ def _run_gateway_runs_api_streaming(
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
+    known_context_length = _gateway_resolve_context_length(
+        model,
+        body_extras.get("provider") if isinstance(body_extras, dict) else None,
+        base_url=base_url,
+        api_key=api_key,
+    )
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -433,7 +515,7 @@ def _run_gateway_runs_api_streaming(
         method="POST",
     )
     update_active_run(stream_id, phase="gateway-request")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _gateway_urlopen(req, timeout=30) as resp:
         run_data = json.loads(resp.read(65536))
     run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
     if not run_id:
@@ -448,7 +530,7 @@ def _run_gateway_runs_api_streaming(
     final_text = ""
     usage: dict = {}
     sse_event = "message"
-    with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
+    with _gateway_urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
             if cancel_event.is_set():
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -525,7 +607,7 @@ def _run_gateway_runs_api_streaming(
                     final_text = output
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] = output
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
@@ -544,7 +626,7 @@ def _run_gateway_runs_api_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += delta
                 put_gateway_event("token", {"text": delta})
-            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
     return final_text, usage
 
 
@@ -645,6 +727,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    gateway_config=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -762,8 +845,20 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        gateway_config_supplied = isinstance(gateway_config, dict)
+        selected_gateway = gateway_config if gateway_config_supplied else {}
+        base_url = str(selected_gateway.get("base_url") or _gateway_base_url(cfg)).rstrip("/")
+        # A supplied target is authoritative: never leak the local key to a
+        # remote target merely because its own credential is absent.
+        api_key = str(selected_gateway.get("api_key") or "").strip() if gateway_config_supplied else _gateway_api_key()
+        session_key_prefix = str(selected_gateway.get("session_key_prefix") or "webui").strip() or "webui"
+        remote_profile = str(selected_gateway.get("remote_profile") or "").strip()
+        known_context_length = _gateway_resolve_context_length(
+            model,
+            model_provider,
+            base_url=base_url,
+            api_key=api_key,
+        )
         try:
             from api.config import _main_model_request_overrides
             _gw_overrides = _main_model_request_overrides(
@@ -783,6 +878,8 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            if remote_profile:
+                body_extras["profile"] = remote_profile
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -837,7 +934,7 @@ def _run_gateway_chat_streaming(
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:
@@ -858,6 +955,8 @@ def _run_gateway_chat_streaming(
                 body["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
+            if remote_profile:
+                body["profile"] = remote_profile
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
@@ -867,7 +966,7 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+            with _gateway_urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -963,8 +1062,8 @@ def _run_gateway_chat_streaming(
                         if stream_id in STREAM_PARTIAL_TEXT:
                             STREAM_PARTIAL_TEXT[stream_id] += delta
                         put_gateway_event("token", {"text": delta})
-                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-            usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+                    usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(last_payload, context_length=known_context_length).items() if v})
         assistant_text = final_text.strip()
         if terminal_error:
             error_payload = _settle_gateway_terminal_error(
