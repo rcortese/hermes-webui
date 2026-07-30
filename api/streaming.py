@@ -2946,6 +2946,10 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Identify the main topic and substantive intent. Prioritize what the conversation seeks "
+            "to resolve, decide, explain, create, or investigate.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
             f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -2957,7 +2961,9 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
-            "Use the actual topic, not the task outcome.\n"
+            "Use the actual substantive topic and intent, not merely the task outcome or workflow.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
             f"{language_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"

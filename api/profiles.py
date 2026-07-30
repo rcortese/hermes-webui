@@ -1931,8 +1931,28 @@ def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
         return rows
     proxy_names = {profile_name_key(row.get("name")) for row in proxies}
     local_rows = [row for row in rows if profile_name_key(row.get("name")) not in proxy_names]
-    active = get_active_profile_name()
-    return [{**row, "is_active": profile_name_key(row.get("name")) == profile_name_key(active)} for row in [*proxies, *local_rows]]
+    active = profile_name_key(get_active_profile_name())
+    combined = [
+        dict(row) if row.get("remote_proxy") else {
+            **row,
+            "is_active": profile_name_key(row.get("name")) == active,
+        }
+        for row in [*proxies, *local_rows]
+    ]
+
+    def _sort_key(row: dict) -> tuple[int, str]:
+        name_key = profile_name_key(row.get("name"))
+        if not row.get("remote_proxy") and name_key == "moss":
+            group = 0
+        elif row.get("remote_proxy"):
+            group = 1
+        elif name_key == "default":
+            group = 2
+        else:
+            group = 3
+        return group, name_key
+
+    return sorted(combined, key=_sort_key)
 
 
 def remote_profile_selector(name: str) -> dict | None:
