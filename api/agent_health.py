@@ -34,6 +34,8 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from api.http import credentialed_urlopen
+
 _GATEWAY_PID_FILE = "gateway.pid"
 _GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
 
@@ -542,12 +544,12 @@ def _http_probe(
     on this particular path) so the caller can move on to the next path.
     ``body`` is the raw response bytes for 2xx responses, None otherwise.
     """
-    headers: dict[str, str] = {}
+    req = urllib_request.Request(url, method="GET")
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib_request.Request(url, method="GET", headers=headers)
+        # Never forward a gateway credential when urllib follows a redirect.
+        req.add_unredirected_header("Authorization", f"Bearer {api_key}")
     try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
+        with credentialed_urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
             status = getattr(resp, "status", None) or resp.getcode()
             ok = 200 <= int(status) < 300
             # Cap the body read: we only need a small JSON health payload, and an
@@ -607,6 +609,10 @@ def _run_remote_probe(base_url: str) -> dict[str, Any]:
                         details["gateway_state"] = data["gateway_state"]
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     pass
+            if path == "/health/detailed":
+                details["telemetry_state"] = "detailed"
+            else:
+                details.update({"reason": "remote_gateway_basic_fallback", "telemetry_state": "basic_fallback", "degraded": True})
             # An over-cap body (len > limit, i.e. the +1 sentinel byte was read)
             # is treated as "alive but no parseable gateway_state" — we still
             # report the gateway as up, just without the detailed state.

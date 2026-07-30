@@ -698,6 +698,12 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    import api.gateway_chat as gateway_chat
+    monkeypatch.setattr(
+        gateway_chat,
+        "resolve_execution_target",
+        lambda *_args, **_kwargs: {"ok": True, "execution_target": "local_direct", "profile_kind": "local_profile"},
+    )
 
     started_threads = []
 

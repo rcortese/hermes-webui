@@ -407,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            if not _is_csp_report_post and (parsed.path != "/api/internal/session-launch" or self.command != "POST") and not check_auth(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
