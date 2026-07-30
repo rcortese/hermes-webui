@@ -70,6 +70,7 @@ def test_remote_gateway_unreachable_when_network_error(monkeypatch):
 
 def test_falls_back_to_local_when_no_env(monkeypatch):
     monkeypatch.delenv("HERMES_API_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
 
     # Force the local importlib path to fail so we hit the well-known
     # "gateway_not_configured" terminal state — proving the remote probe was
@@ -214,6 +215,7 @@ def test_gateway_health_url_env_used(monkeypatch):
 def test_default_url_when_no_env(monkeypatch):
     """Without any gateway env vars, should fall back to local detection (not remote)."""
     monkeypatch.delenv("HERMES_API_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
     monkeypatch.delenv("GATEWAY_HEALTH_URL", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_HEALTH_URL", raising=False)
 
@@ -256,6 +258,7 @@ def test_gateway_webui_base_url_env_is_used_for_remote_probe(monkeypatch):
     """`HERMES_WEBUI_GATEWAY_BASE_URL` should be treated like a gateway health base URL."""
     monkeypatch.delenv("HERMES_API_URL", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_HEALTH_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
     monkeypatch.delenv("GATEWAY_HEALTH_URL", raising=False)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://container-gw:8642")
     seen = []
