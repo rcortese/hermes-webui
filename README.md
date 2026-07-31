@@ -165,7 +165,7 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
-Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.
+Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither. Multi-Gateway profile routing and this fork's other deployment contracts are documented separately in [`docs/fork-runtime-extensions.md`](docs/fork-runtime-extensions.md).
 
 The bootstrap will:
 
@@ -680,6 +680,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 **Deploying & operating**
 - [`docs/remote-access.md`](docs/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
 - [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
+- [`docs/fork-runtime-extensions.md`](docs/fork-runtime-extensions.md) — remote profile proxies, service-authorized session launch, and fork-specific runtime contracts
 - [`docs/docker.md`](docs/docker.md) — Docker compose setup, common failures, and bind-mount migration
 - [`docs/supervisor.md`](docs/supervisor.md) — launchd, systemd, supervisord, runit, and s6 process-supervisor setup
 - [`docs/wsl-autostart.md`](docs/wsl-autostart.md) — WSL2 auto-start at Windows login
