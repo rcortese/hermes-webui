@@ -14,6 +14,9 @@ def test_title_prompts_prioritize_substantive_topic_over_workflow():
     assert all("Do not prioritize method, format, tool, role" in prompt for prompt in prompts)
     assert any("main topic and substantive intent" in prompt for prompt in prompts)
     assert all("unless it is itself the central subject" in prompt for prompt in prompts)
+    assert all("references, URLs, profile names, and session IDs as non-binding transport/context" in prompt for prompt in prompts)
+    assert all("a new substantive intent takes precedence" in prompt for prompt in prompts)
+    assert all("only when the user explicitly asks about them" in prompt for prompt in prompts)
 
 
 def test_title_prompts_preserve_language_and_output_guards():
