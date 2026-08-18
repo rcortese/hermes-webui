@@ -1,6 +1,6 @@
 # Deployment extensions in this fork
 
-This fork carries a small set of deployment-oriented extensions on top of Hermes WebUI `v0.52.106`. They support installations where one WebUI presents local profiles alongside profiles owned by separate Hermes Gateway instances.
+This fork carries a small set of deployment-oriented extensions on top of Hermes WebUI `v0.52.113`. They support installations where one WebUI presents local profiles alongside profiles owned by separate Hermes Gateway instances.
 
 These features are optional. A normal single-instance installation continues to use local, in-process chat unless Gateway mode or a remote profile proxy is explicitly configured.
 
@@ -98,11 +98,11 @@ Automatic title prompts prioritize the conversation's substantive topic and inte
 
 ## `no response` compatibility bridge
 
-The `v0.52.106` transcript evaluator can misclassify a successful turn as “no response” when the current user message was already checkpointed at the durable transcript boundary. This fork recognizes only the exact matching final display-tail user as the checkpointed current turn.
+The `v0.52.113` transcript evaluator can still misclassify a successful turn as “no response” when the current user message was already checkpointed at the durable transcript boundary. This fork recognizes only the exact matching final display-tail user as the checkpointed current turn.
 
 The bridge deliberately does not treat an arbitrary older same-text user row as the current turn. That negative case remains terminal so a replayed historical assistant message cannot satisfy a new retry.
 
-This is a compatibility bridge for the `v0.52.106` data model, not a universal turn-ownership mechanism. Upstream development now carries explicit active-turn identity. Remove this bridge when the selected stable upstream release contains that architecture and its identical-prompt retry regressions.
+This is a narrow evaluator compatibility bridge, not a universal turn-ownership mechanism. Upstream `v0.52.113` carries stronger turn identity and merge ownership, but the terminal evaluator still needs this exact display-tail boundary case. Remove the bridge only when a later stable release passes both the eager-checkpoint positive regression and the historical same-text negative regression without it.
 
 ## Validation and activation boundary
 

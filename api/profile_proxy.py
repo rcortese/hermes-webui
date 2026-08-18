@@ -15,7 +15,7 @@ def _normalized_proxy_url(value: object) -> str | None:
         return None
     try:
         parsed = urlparse(base_url)
-        parsed.port  # validates numeric range and malformed ports
+        _validated_port = parsed.port  # validates numeric range and malformed ports
     except ValueError:
         return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
