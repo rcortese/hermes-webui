@@ -21048,20 +21048,12 @@ def _start_chat_stream_for_session(
     external_runtime_owned: bool | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
-    if external_runtime_owned is None:
-        external_runtime_owned = webui_gateway_chat_enabled(get_config())
-    backend_is_gateway = bool(external_runtime_owned)
-    stale_response = _agent_runtime_barrier_response(
-        external_runtime_owned=backend_is_gateway,
-    )
-    if stale_response is not None:
-        stale_response["_status"] = 409
-        return stale_response
-    attachments = attachments or []
     # Resolve ownership before persisting pending state. An unconfigured remote
-    # selection must fail closed without creating a local fallback turn.
+    # selection must fail closed without creating a local fallback turn. Resolve
+    # it before the local-runtime revision barrier too: a remote proxy owns its
+    # runtime even when this WebUI's global Gateway mode is disabled.
     from api.gateway_chat import _gateway_api_key, _gateway_base_url, resolve_execution_target
-    from api.profiles import get_active_profile_name, list_profiles_api
+    from api.profiles import get_active_profile_name
     selected_profile = getattr(s, "profile", None) or get_active_profile_name()
     cfg = get_config()
     execution_target = resolve_execution_target(
@@ -21077,6 +21069,14 @@ def _start_chat_stream_for_session(
     )
     if not execution_target.get("ok"):
         return {"error": execution_target.get("error", "chat target unavailable"), "error_type": execution_target.get("error_type"), "_status": execution_target.get("_status", 404)}
+    backend_is_gateway = execution_target["execution_target"] in {"remote_gateway", "local_gateway"}
+    stale_response = _agent_runtime_barrier_response(
+        external_runtime_owned=backend_is_gateway,
+    )
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
+    attachments = attachments or []
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
     # duplicated clarify cards for what appears to be a single user request.
@@ -21194,7 +21194,6 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = execution_target["execution_target"] in {"remote_gateway", "local_gateway"}
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if backend_is_gateway and execution_target.get("gateway_config") is not None:

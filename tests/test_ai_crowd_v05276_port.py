@@ -43,6 +43,44 @@ def test_remote_local_homonym_is_rejected_case_insensitively():
     }
 
 
+def test_remote_target_owns_runtime_before_local_revision_barrier(monkeypatch):
+    """Global local-direct mode must not make a remote proxy hit the local barrier."""
+    from api import gateway_chat, profiles, routes
+
+    barrier_calls = []
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(gateway_chat, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(gateway_chat, "_gateway_base_url", lambda _cfg: "http://local.invalid:8642")
+    monkeypatch.setattr(gateway_chat, "_gateway_api_key", lambda: "local-key")
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        gateway_chat,
+        "resolve_execution_target",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "execution_target": "remote_gateway",
+            "profile_kind": "remote_gateway_proxy",
+            "gateway_config": {"base_url": "http://roy.invalid:8645", "api_key": "remote-key"},
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_agent_runtime_barrier_response",
+        lambda **kwargs: barrier_calls.append(kwargs) or {"error": "stop after ownership check"},
+    )
+
+    result = routes._start_chat_stream_for_session(
+        SimpleNamespace(profile="roy"),
+        msg="hello",
+        workspace="/tmp",
+        model="provider/model",
+        external_runtime_owned=False,
+    )
+
+    assert barrier_calls == [{"external_runtime_owned": True}]
+    assert result == {"error": "stop after ownership check", "_status": 409}
+
+
 def test_profile_selector_uses_canonical_order_and_preserves_active_state(monkeypatch):
     from api import config, profiles
 
