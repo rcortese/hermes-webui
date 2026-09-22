@@ -16353,7 +16353,7 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
+        cookie_val = create_session(auth_type="password")
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -21196,6 +21196,9 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if backend_is_gateway and execution_target["execution_target"] == "local_gateway":
+        from agent.moss_memory_gate import web_admission
+        worker_kwargs["memory_admission"] = web_admission.get() if not goal_related and source == "webui" else None
     if backend_is_gateway and execution_target.get("gateway_config") is not None:
         worker_kwargs["gateway_config"] = execution_target["gateway_config"]
     if moa_config and not backend_is_gateway:
@@ -21952,6 +21955,10 @@ def _handle_goal_command(handler, body):
     return j(handler, payload)
 
 
+from agent.moss_memory_gate import capture_browser as _capture_moss_memory_browser
+
+
+@_capture_moss_memory_browser
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None

@@ -439,7 +439,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, memory_admission=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -509,9 +509,13 @@ def _run_gateway_runs_api_streaming(
         run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
     if conversation_history:
         run_body["conversation_history"] = conversation_history
+    wire_body = json.dumps(run_body).encode("utf-8")
+    from agent.moss_memory_gate import sign_request
+    headers.update(sign_request(memory_admission, wire_body, session_id,
+                                memory_admission["profile"] if memory_admission else "default"))
     req = urllib.request.Request(
         url_runs,
-        data=json.dumps(run_body).encode("utf-8"),
+        data=wire_body,
         headers=headers,
         method="POST",
     )
@@ -729,6 +733,7 @@ def _run_gateway_chat_streaming(
     model_provider=None,
     goal_related=False,
     gateway_config=None,
+    memory_admission=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -890,6 +895,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    memory_admission=memory_admission,
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
