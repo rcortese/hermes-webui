@@ -573,7 +573,7 @@ def test_gateway_approval_response_relay():
         _handle_approval_respond(handler, body)
 
     assert captured.get("url", "") == "http://gw:8642/v1/runs/run%20abc%2F1/approval"
-    assert captured["body"] == {"choice": "once", "approval_id": "appr x/y"}
+    assert captured["body"] == {"choice": "once", "approval_id": "appr x/y", "request_id": "appr x/y"}
     handler.send_response.assert_called_with(200)
 
     # Cleanup.
