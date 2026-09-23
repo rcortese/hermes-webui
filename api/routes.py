@@ -12297,6 +12297,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
+        from api.model_catalog import apply_local_catalog
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
         # the detached rebuild worker (and the legacy synchronous rebuild),
@@ -12309,10 +12310,10 @@ def handle_get(handler, parsed) -> bool:
             if freshness == "session_visit":
                 result = get_available_models_for_session_visit()
                 diag.stage("response_serialize") if diag else None
-                return j(handler, result)
+                return j(handler, apply_local_catalog(result))
             if freshness:
                 return bad(handler, f"unknown models freshness: {freshness}", status=400)
-            return j(handler, get_available_models())
+            return j(handler, apply_local_catalog(get_available_models()))
         finally:
             if diag:
                 diag.finish()
@@ -19740,13 +19741,14 @@ def _handle_live_models(handler, parsed):
         provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
+        from api.model_catalog import apply_local_catalog
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
-            return j(handler, cached)
+            return j(handler, apply_local_catalog(cached))
 
         def _finish(payload: dict):
             _set_cached_live_models(cache_key, payload)
-            return j(handler, payload)
+            return j(handler, apply_local_catalog(payload))
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
