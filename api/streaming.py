@@ -4748,6 +4748,13 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Identify the main topic and substantive intent. Prioritize what the conversation seeks "
+            "to resolve, decide, explain, create, or investigate.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
+            "Treat pasted references, URLs, profile names, and session IDs as non-binding transport/context; "
+            "a new substantive intent takes precedence, and an old title is only a fallback. "
+            "Make links or references the subject only when the user explicitly asks about them.\n"
             f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -4759,7 +4766,12 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
-            "Use the actual topic, not the task outcome.\n"
+            "Use the actual substantive topic and intent, not merely the task outcome or workflow.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
+            "Treat pasted references, URLs, profile names, and session IDs as non-binding transport/context; "
+            "a new substantive intent takes precedence, and an old title is only a fallback. "
+            "Make links or references the subject only when the user explicitly asks about them.\n"
             f"{language_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -8145,9 +8157,17 @@ def _turn_transcript_lacks_final_assistant_answer(
     current_user_idx = current_user_token_idx
     if current_user_idx is None:
         current_user_idx = _find_current_user_turn(merged_messages, msg_text)
+    checkpointed_current_user = bool(
+        not active_turn_identity
+        and current_user_idx is not None
+        and current_user_idx == len(previous_display) - 1
+        and previous_display
+        and _message_identity(merged_messages[current_user_idx]) == _message_identity(previous_display[-1])
+    )
     if current_user_idx is None or (
         current_user_token_idx is None
         and current_user_idx < len(previous_display)
+        and not checkpointed_current_user
     ):
         # The active turn lives after the durable transcript boundary. If the
         # merged display only exposes an older user row, materialize the pending

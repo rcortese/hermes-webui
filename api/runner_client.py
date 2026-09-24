@@ -82,7 +82,8 @@ class HttpRunnerClient:
     def respond_approval(self, run_id: str, approval_id: str, choice: str) -> dict[str, Any]:
         return self._post(
             f"/v1/runs/{urllib.parse.quote(str(run_id), safe='')}/approval",
-            {"choice": choice, "approval_id": approval_id},
+            # Current Agent runs target request_id; retain the legacy wire key.
+            {"choice": choice, "approval_id": approval_id, "request_id": approval_id},
         )
 
     def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> dict[str, Any]:

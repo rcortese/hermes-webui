@@ -376,7 +376,7 @@ def test_legacy_approval_records_run_id_for_response_relay():
         assert captured.get("url", "") == "http://gw:8642/v1/runs/run-legacy-1/approval", (
             f"approval respond must relay to the gateway run; got {captured.get('url')!r}"
         )
-        assert captured["body"] == {"choice": "once", "approval_id": ""}
+        assert captured["body"] == {"choice": "once", "approval_id": "", "request_id": ""}
         handler.send_response.assert_called_with(200)
     finally:
         with STREAMS_LOCK:
@@ -699,7 +699,7 @@ def test_mirrored_run_id_survives_active_stream_loss():
         assert captured.get("url", "") == f"http://gw:8642/v1/runs/{run_id}/approval", (
             f"approval respond must relay to the mirrored gateway run; got {captured.get('url')!r}"
         )
-        assert captured["body"] == {"choice": "once", "approval_id": ""}
+        assert captured["body"] == {"choice": "once", "approval_id": "", "request_id": ""}
         handler.send_response.assert_called_with(200)
         assert entry.event.is_set(), "mirrored gateway approval was not resolved"
         assert entry.result == "once"

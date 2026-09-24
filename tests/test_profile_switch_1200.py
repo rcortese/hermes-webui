@@ -700,6 +700,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
 
     started_threads = []
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_kwargs: [{"name": "work"}])
 
     class FakeThread:
         def __init__(self, *args, **kwargs):

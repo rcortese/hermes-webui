@@ -483,6 +483,45 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
 )
 
 
+def _remote_cron_proxy_unsupported_payload(proxy: dict | None = None) -> dict:
+    """Return a secret-free refusal instead of touching Moss-local cron state."""
+    proxy = proxy or {}
+    return {
+        "error": "remote_cron_proxy_unsupported",
+        "profile_kind": "remote_gateway_proxy",
+        "remote_proxy": True,
+        "backend": "unsupported_remote",
+        "profile": proxy.get("name"),
+        "label": proxy.get("label") or proxy.get("name"),
+        "message": (
+            "Cron operations for remote profile proxies are not supported here. "
+            "Moss-local cron jobs were not read or modified"
+        ),
+    }
+
+
+def _active_remote_cron_proxy() -> dict | None:
+    active_profile = "unknown"
+    try:
+        from api.config import get_config
+        from api.profile_proxy import profile_proxy_for
+
+        active_profile = str(get_active_profile_name() or "unknown")
+        return profile_proxy_for(active_profile, get_config())
+    except Exception:
+        # Cron is a mutating local capability. If remote-target classification
+        # cannot be established, block rather than risking Moss-local cron state.
+        return {"name": active_profile, "label": active_profile}
+
+
+def _guard_remote_cron_proxy(handler) -> bool:
+    proxy = _active_remote_cron_proxy()
+    if proxy is None:
+        return False
+    j(handler, _remote_cron_proxy_unsupported_payload(proxy))
+    return True
+
+
 def _all_profiles_query_flag(parsed_url) -> bool:
     """Return True if the request URL has `?all_profiles=1` (or true/yes).
 
@@ -5892,8 +5931,11 @@ def apply_cors_preflight_headers(handler) -> None:
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 
-def _csrf_exempt_path(path: str) -> bool:
+def _csrf_exempt_path(path: str, method: str = "POST") -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
+    from api.service_session_launch import is_service_launch_path
+    if is_service_launch_path(path) and method == "POST":
+        return True  # independently bearer-authorized; never browser-cookie authority
     return path in {
         "/api/auth/login",
         "/api/auth/passkey/options",
@@ -15027,6 +15069,8 @@ def handle_get(handler, parsed) -> bool:
     # aggregates per visible profile home so the UI can surface hidden-row
     # counts and, when opted in, read-only foreign rows.
     if parsed.path == "/api/crons":
+        if _guard_remote_cron_proxy(handler):
+            return True
         # #4768: in split-container / minimal Docker deployments the WebUI image may
         # not ship the agent's `cron` package on its import path. Degrade gracefully
         # (empty list + cron_unavailable flag) instead of 500ing the whole Task tab.
@@ -15052,6 +15096,8 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/crons/output":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15059,6 +15105,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15066,6 +15114,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15073,6 +15123,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15080,12 +15132,16 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15672,6 +15728,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/internal/session-launch":
+        from api.service_session_launch import handle_service_session_launch
+        return handle_service_session_launch(handler, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -17097,6 +17157,8 @@ def handle_post(handler, parsed) -> bool:
     # See GET-side comment above: wrap in cron_profile_context so writes go
     # to the TLS-active profile's jobs.json instead of the process default.
     if parsed.path == "/api/crons/create":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17104,6 +17166,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17111,6 +17175,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17118,6 +17184,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17125,6 +17193,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17132,6 +17202,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17293,9 +17365,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.auth import ensure_trusted_auth_session
-            from api.profiles import switch_profile, _validate_profile_name
+            from api.profiles import remote_profile_selector, switch_profile, _validate_profile_name
+            from api.profile_proxy import profile_proxy_for
             from api.helpers import build_profile_cookie
-            if name != 'default':
+            remote = remote_profile_selector(name)
+            if profile_proxy_for(name) and remote is None:
+                return bad(handler, "selected profile is both local and remote", 409)
+            if remote is not None:
+                name = remote["active"]
+            elif name != 'default':
                 _validate_profile_name(name)
             session_info = ensure_trusted_auth_session(handler)
             if getattr(handler, '_trusted_auth_session_rejected', False):
@@ -17305,7 +17383,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
-            result = switch_profile(name, process_wide=False)
+            result = remote if remote is not None else switch_profile(name, process_wide=False)
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
@@ -17314,7 +17392,8 @@ def handle_post(handler, parsed) -> bool:
             invalidate_models_cache(delete_disk=False)
             try:
                 from api.gateway_watcher import restart_watcher_for_profile
-                restart_watcher_for_profile(name)
+                if remote is None:
+                    restart_watcher_for_profile(name)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
             session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
@@ -23533,6 +23612,7 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
+    gateway_config=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23577,6 +23657,7 @@ def _start_regeneration_stream_locked(
     }
     if backend_is_gateway:
         worker_kwargs["regeneration"] = True
+        worker_kwargs["gateway_config"] = gateway_config
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
 
@@ -23893,9 +23974,19 @@ def _start_chat_stream_for_session(
     regeneration=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
-    if external_runtime_owned is None:
-        external_runtime_owned = webui_gateway_chat_enabled(get_config())
-    backend_is_gateway = bool(external_runtime_owned)
+    from api.gateway_chat import _gateway_api_key, _gateway_base_url, resolve_execution_target
+    from api.profiles import get_active_profile_name
+    cfg = get_config()
+    execution_target = resolve_execution_target(
+        getattr(s, "profile", None) or get_active_profile_name(),
+        local_gateway_enabled=webui_gateway_chat_enabled(cfg) if external_runtime_owned is None else bool(external_runtime_owned),
+        config_data=cfg,
+        profiles=list_profiles_api(include_remote=False),
+        local_gateway_config={"base_url": _gateway_base_url(cfg), "api_key": _gateway_api_key(), "session_key_prefix": "webui"},
+    )
+    if not execution_target.get("ok"):
+        return {"error": execution_target.get("error"), "error_type": execution_target.get("error_type"), "_status": execution_target.get("_status", 404)}
+    backend_is_gateway = execution_target["execution_target"] in {"remote_gateway", "local_gateway"}
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -23972,6 +24063,7 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
+                        gateway_config=execution_target.get("gateway_config"),
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -24036,6 +24128,8 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if backend_is_gateway:
+        worker_kwargs["gateway_config"] = execution_target["gateway_config"]
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:

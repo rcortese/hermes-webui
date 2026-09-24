@@ -2123,7 +2123,72 @@ def _build_profile_rows_fast() -> list | None:
     return rows
 
 
-def list_profiles_api() -> list:
+def _with_remote_profile_proxies(rows: list[dict]) -> list[dict]:
+    """Suppress local homonyms and append canonical remote selector targets."""
+    try:
+        from api.config import get_config
+        from api.profile_proxy import profile_name_key, profile_proxy_public_entries
+        proxies = profile_proxy_public_entries(get_config())
+    except Exception:
+        return rows
+    proxy_names = {profile_name_key(row.get("name")) for row in proxies}
+    local_rows = [row for row in rows if profile_name_key(row.get("name")) not in proxy_names]
+    active = profile_name_key(get_active_profile_name())
+    combined = [
+        dict(row) if row.get("remote_proxy") else {
+            **row,
+            "is_active": profile_name_key(row.get("name")) == active,
+        }
+        for row in [*proxies, *local_rows]
+    ]
+
+    def _sort_key(row: dict) -> tuple[int, str]:
+        name_key = profile_name_key(row.get("name"))
+        if not row.get("remote_proxy") and name_key == "moss":
+            group = 0
+        elif row.get("remote_proxy"):
+            group = 1
+        elif name_key == "default":
+            group = 2
+        else:
+            group = 3
+        return group, name_key
+
+    return sorted(combined, key=_sort_key)
+
+
+def remote_profile_selector(name: str) -> dict | None:
+    """Return safe remote-selector metadata, never a local profile home."""
+    try:
+        from api.profile_proxy import profile_name_key, profile_proxy_for
+
+        proxy = profile_proxy_for(name)
+        if not proxy:
+            return None
+        key = profile_name_key(name)
+        local_rows = list_profiles_api(include_remote=False)
+        if any(profile_name_key(row.get("name")) == key for row in local_rows):
+            return None
+        selector_name = str(proxy.get("name") or "").strip()
+        if not selector_name:
+            return None
+        return {
+            "name": selector_name,
+            "profiles": list_profiles_api(),
+            "active": selector_name,
+            "is_default": False,
+            "default_model": str(proxy.get("remote_profile") or selector_name),
+            "default_model_provider": "remote-gateway",
+            "default_workspace": None,
+            "remote_proxy": True,
+            "profile_kind": "remote_gateway_proxy",
+        }
+    except Exception:
+        logger.debug("Failed to resolve remote profile selector", exc_info=True)
+        return None
+
+
+def list_profiles_api(*, include_remote: bool = True) -> list:
     """List all profiles with metadata, serialized for JSON response.
 
     In isolated profile mode (HERMES_HOME points to ~/.hermes/profiles/<name>),
@@ -2239,7 +2304,8 @@ def list_profiles_api() -> list:
         return result
 
     active = get_active_profile_name()
-    return [{**p, 'is_active': p['name'] == active} for p in rows]
+    local_rows = [{**p, 'is_active': p['name'] == active} for p in rows]
+    return _with_remote_profile_proxies(local_rows) if include_remote else local_rows
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:
