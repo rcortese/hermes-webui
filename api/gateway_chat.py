@@ -648,11 +648,17 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
         put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
 
 
-def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
+def _admit_gateway_run(url_runs, headers, run_body, stream_id, *, memory_admission=None) -> str:
     """POST /v1/runs; the same stream and body return the originally admitted run id."""
+    wire_body = json.dumps(run_body).encode("utf-8")
+    from agent.moss_memory_gate import sign_request
+    headers = {**headers, **sign_request(
+        memory_admission, wire_body, str(run_body.get("session_id") or ""),
+        memory_admission["profile"] if memory_admission else "default",
+    )}
     req = urllib.request.Request(
         url_runs,
-        data=json.dumps(run_body).encode("utf-8"),
+        data=wire_body,
         # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
         headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
         method="POST",
@@ -684,6 +690,7 @@ def _run_gateway_runs_api_streaming(
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
     on_run_id=None,
+    memory_admission=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     known_context_length = _gateway_resolve_context_length(
@@ -748,7 +755,7 @@ def _run_gateway_runs_api_streaming(
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
             on_run_id("", request=run_body)
-        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
+        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id, memory_admission=memory_admission)
     except Exception:
         _finish_gateway_run_starting(stream_id)
         raise
@@ -1223,6 +1230,7 @@ def _run_gateway_chat_streaming(
     reattach_run=None,
     reattach_endpoint=None,
     gateway_config=None,
+    memory_admission=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1413,6 +1421,7 @@ def _run_gateway_chat_streaming(
                         session=s,
                         active_provider=(model_provider or ""),
                         on_run_id=record_run,
+                        memory_admission=memory_admission,
                     )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(

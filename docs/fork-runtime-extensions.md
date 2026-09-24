@@ -110,6 +110,12 @@ The upstream `legacy` local-worker backend tag remains unchanged: cancellation a
 
 Copy conversation links include an escaped title and profile-aware `@session:profile/id` locator, with clipboard fallback and failure reporting. Title generation treats pasted links as context rather than automatically selecting their old title.
 
+## Moss-only integration
+
+This branch also carries profile-local model picker curation (see [local-model-catalog.md](local-model-catalog.md)) and the authenticated browser memory bridge from the Moss image. It requires that image's `agent.moss_memory_gate` source module; it is not a standalone upstream WebUI distribution. Roy uses the common branch without that dependency.
+
+Password login records its authentication type. Only the gate's admitted browser context, a local Gateway target, source `webui`, and a non-goal turn can forward memory admission. Normal and regenerated turns use the same restriction. Service launches, remote proxies, cron/goals, and restart re-admission cannot mint browser authority. Signing happens over the exact serialized Runs API request while retaining upstream's `Idempotency-Key`. Neither the memory proof nor the browser admission is persisted in the Gateway restart record. Gate policy, key custody and the receiving Agent remain external deployment prerequisites.
+
 ## Validation and activation boundary
 
 The fork-specific contracts have focused tests for:

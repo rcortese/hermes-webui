@@ -14392,6 +14392,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
+        from api.model_catalog import apply_local_catalog
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
         # the detached rebuild worker (and the legacy synchronous rebuild),
@@ -14404,10 +14405,10 @@ def handle_get(handler, parsed) -> bool:
             if freshness == "session_visit":
                 result = get_available_models_for_session_visit()
                 diag.stage("response_serialize") if diag else None
-                return j(handler, result)
+                return j(handler, apply_local_catalog(result))
             if freshness:
                 return bad(handler, f"unknown models freshness: {freshness}", status=400)
-            return j(handler, get_available_models())
+            return j(handler, apply_local_catalog(get_available_models()))
         finally:
             if diag:
                 diag.finish()
@@ -18139,7 +18140,7 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
+        cookie_val = create_session(auth_type="password")
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -22155,13 +22156,14 @@ def _handle_live_models(handler, parsed):
         provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
+        from api.model_catalog import apply_local_catalog
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
-            return j(handler, cached)
+            return j(handler, apply_local_catalog(cached))
 
         def _finish(payload: dict):
             _set_cached_live_models(cache_key, payload)
-            return j(handler, payload)
+            return j(handler, apply_local_catalog(payload))
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
@@ -23613,6 +23615,7 @@ def _start_regeneration_stream_locked(
     moa_config,
     backend_is_gateway: bool,
     gateway_config=None,
+    memory_admission=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23658,6 +23661,7 @@ def _start_regeneration_stream_locked(
     if backend_is_gateway:
         worker_kwargs["regeneration"] = True
         worker_kwargs["gateway_config"] = gateway_config
+        worker_kwargs["memory_admission"] = memory_admission
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
 
@@ -23957,6 +23961,13 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _moss_gateway_memory_admission(execution_target, source, goal_related):
+    if execution_target.get("execution_target") != "local_gateway" or source != "webui" or goal_related:
+        return None
+    from agent.moss_memory_gate import web_admission
+    return web_admission.get()
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -24064,6 +24075,7 @@ def _start_chat_stream_for_session(
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
                         gateway_config=execution_target.get("gateway_config"),
+                        memory_admission=_moss_gateway_memory_admission(execution_target, source, goal_related),
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -24128,6 +24140,8 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if backend_is_gateway and execution_target["execution_target"] == "local_gateway":
+        worker_kwargs["memory_admission"] = _moss_gateway_memory_admission(execution_target, source, goal_related)
     if backend_is_gateway:
         worker_kwargs["gateway_config"] = execution_target["gateway_config"]
     if moa_config and not backend_is_gateway:
@@ -24972,6 +24986,10 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
+from agent.moss_memory_gate import capture_browser as _capture_moss_memory_browser
+
+
+@_capture_moss_memory_browser
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
