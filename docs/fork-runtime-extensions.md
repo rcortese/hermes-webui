@@ -108,7 +108,16 @@ The prerelease retains upstream's explicit active-turn identity as authoritative
 
 The upstream `legacy` local-worker backend tag remains unchanged: cancellation and Steer use it as an ownership discriminator. Gateway admission idempotency, restart reattachment, approval capability negotiation, profile-aware cache invalidation, and regeneration transactions are retained. Remote target resolution also reaches regeneration and restart reattachment. Approval events prefer Agent `request_id`; replies carry both `request_id` and the compatibility `approval_id`.
 
-Copy conversation links include an escaped title and profile-aware `@session:profile/id` locator, with clipboard fallback and failure reporting. Title generation treats pasted links as context rather than automatically selecting their old title.
+Copy conversation links produce reference data ready to paste into another session:
+
+```text
+Conversation reference: [Storage migration](https://webui.example/session/abc123)
+Internal session: `@session:moss/abc123`
+```
+
+The title stays clickable for people; the separate internal locator identifies the profile and conversation without making the URL a retrieval instruction. This is not a public share and does not grant access. The conversation's profile takes precedence over the active selector, with `default` as the last fallback. Titles are escaped, identifiers are URL-encoded, and the WebUI mount subpath is retained; query parameters (including PWA launch metadata) and fragments are omitted. Clipboard rejection uses the legacy copy fallback and reports failure rather than false success if both methods fail.
+
+Paste your new request alongside the reference. Title-generation prompts prioritize that new substantive intent; the old title is context and only a fallback when no new topic is supplied. This guides title generation, not the agent's tools or policies, and cannot guarantee what a model will choose to retrieve.
 
 ## Moss-only integration
 

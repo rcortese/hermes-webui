@@ -80,11 +80,11 @@ def _run_copy_link_driver(cases):
             "const writes=[],fallbackWrites=[],toasts=[],publicCalls=[];",
             "global.S={activeProfile:c.activeProfile||''};",
             "global.window={location:{origin:c.origin,href:c.href||c.origin+'/',pathname:'/',search:'',hash:''},open:(...args)=>publicCalls.push(args)};",
-            "const created=[]; global.document={baseURI:c.baseURI||c.origin+'/',body:{appendChild:()=>{}},createElement:()=>{const ta={style:{},setAttribute:()=>{},select:()=>{},remove:()=>{}};created.push(ta);return ta;},execCommand:command=>{if(command==='copy') fallbackWrites.push(created.at(-1).value);return c.execResult;}};",
+            "const created=[]; global.document={baseURI:c.baseURI||c.origin+'/',body:{appendChild:()=>{}},createElement:()=>{const ta={style:{},setAttribute:()=>{},select:()=>{if(c.selectThrows) throw new Error('selection failed');},remove:()=>{ta.removed=true;}};created.push(ta);return ta;},execCommand:command=>{if(c.execThrows) throw new Error('copy failed');if(command==='copy') fallbackWrites.push(created.at(-1).value);return c.execResult;}};",
             "global.t=k=>k; global.showToast=(...args)=>toasts.push(args);",
             "global.api=async(...args)=>{publicCalls.push(args); throw new Error('unexpected public share call');};",
             "if(c.mode==='fallback') Object.defineProperty(global,'navigator',{value:{},configurable:true}); else Object.defineProperty(global,'navigator',{value:{clipboard:{writeText:async text=>{writes.push(text);if(c.mode==='reject') throw new Error('denied');}}},configurable:true});",
-            "await _copySessionLink(c.session); out.push({writes,fallbackWrites,toasts,publicCalls});",
+            "await _copySessionLink(c.session); out.push({writes,fallbackWrites,toasts,publicCalls,allRemoved:created.every(ta=>ta.removed)});",
             "}",
             "process.stdout.write(JSON.stringify(out));",
             "})().catch(err=>{console.error(err.stack||err);process.exit(1)});",
@@ -95,12 +95,16 @@ def _run_copy_link_driver(cases):
     return json.loads(result.stdout)
 
 
+def _reference(title, profile, sid, url):
+    return f"Conversation reference: [{title}]({url})\nInternal session: `@session:{profile}/{sid}`"
+
+
 def test_copy_link_writes_exact_markdown_payload_for_default_profile():
     result = _run_copy_link_driver([{
         "origin": "https://host.test",
         "session": {"session_id": "abc123", "title": "Plan *now*\n"},
     }])[0]
-    assert result["writes"] == ["[Plan \\*now\\* · @session:default/abc123](https://host.test/session/abc123)"]
+    assert result["writes"] == [_reference(r"Plan \*now\*", "default", "abc123", "https://host.test/session/abc123")]
     assert result["toasts"] == [["session_link_copied"]]
     assert result["publicCalls"] == []
 
@@ -112,7 +116,7 @@ def test_copy_link_preserves_profile_and_encodes_special_id_and_subpath():
         "session": {"session_id": "a/b (c)", "profile": "moss", "title": "Plan [x]\nNext *now*"},
     }])[0]
     assert result["writes"] == [
-        "[Plan \\[x\\] Next \\*now\\* · @session:moss/a%2Fb%20%28c%29](https://host.test/hermes/session/a%2Fb%20%28c%29)"
+        _reference(r"Plan \[x\] Next \*now\*", "moss", "a%2Fb%20%28c%29", "https://host.test/hermes/session/a%2Fb%20%28c%29")
     ]
     assert result["toasts"] == [["session_link_copied"]]
     assert result["publicCalls"] == []
@@ -123,7 +127,7 @@ def test_copy_link_escapes_literal_strikethrough_delimiters_in_title():
         "origin": "https://host.test",
         "session": {"session_id": "abc123", "title": "~~literal~~"},
     }])[0]
-    assert result["writes"] == ["[\\~\\~literal\\~\\~ · @session:default/abc123](https://host.test/session/abc123)"]
+    assert result["writes"] == [_reference(r"\~\~literal\~\~", "default", "abc123", "https://host.test/session/abc123")]
 
 
 def test_copy_link_uses_active_profile_only_as_safe_fallback():
@@ -132,7 +136,7 @@ def test_copy_link_uses_active_profile_only_as_safe_fallback():
         "activeProfile": "nondefault",
         "session": {"session_id": "abc123", "title": "Topic"},
     }])[0]
-    assert result["writes"] == ["[Topic · @session:nondefault/abc123](https://host.test/session/abc123)"]
+    assert result["writes"] == [_reference("Topic", "nondefault", "abc123", "https://host.test/session/abc123")]
 
 
 def test_copy_link_uses_fallback_for_clipboard_rejection_and_copies_same_payload():
@@ -140,7 +144,7 @@ def test_copy_link_uses_fallback_for_clipboard_rejection_and_copies_same_payload
         "origin": "https://host.test", "mode": "reject", "execResult": True,
         "session": {"session_id": "abc", "title": "Topic"},
     }])[0]
-    payload = "[Topic · @session:default/abc](https://host.test/session/abc)"
+    payload = _reference("Topic", "default", "abc", "https://host.test/session/abc")
     assert result["writes"] == [payload]
     assert result["fallbackWrites"] == [payload]
     assert result["toasts"] == [["session_link_copied"]]
@@ -151,9 +155,85 @@ def test_copy_link_reports_rejected_clipboard_and_failed_fallback_without_false_
         "origin": "https://host.test", "mode": "reject", "execResult": False,
         "session": {"session_id": "abc", "title": "Topic"},
     }])[0]
-    assert result["writes"] == ["[Topic · @session:default/abc](https://host.test/session/abc)"]
-    assert result["fallbackWrites"] == ["[Topic · @session:default/abc](https://host.test/session/abc)"]
+    assert result["writes"] == [_reference("Topic", "default", "abc", "https://host.test/session/abc")]
+    assert result["fallbackWrites"] == result["writes"]
     assert result["toasts"] == [["session_link_copy_failedClipboard copy was not completed"]]
+
+
+@pytest.mark.parametrize("profile", ["moss", "roy"])
+def test_copy_link_is_neutral_internal_reference_with_clean_clickable_url(profile):
+    result = _run_copy_link_driver([{
+        "origin": "https://host.test",
+        "href": "https://host.test/hermes/?source=pwa&session=old&session_id=older&prompt=secret#chat",
+        "baseURI": "https://host.test/hermes/",
+        "activeProfile": "wrong-profile",
+        "session": {"session_id": "id", "profile": profile, "title": "Old topic"},
+    }])[0]
+    assert result["writes"] == [_reference("Old topic", profile, "id", "https://host.test/hermes/session/id")]
+    assert result["publicCalls"] == []
+
+
+def test_copy_link_keeps_hostile_metadata_literal():
+    result = _run_copy_link_driver([{
+        "origin": "https://host.test",
+        "session": {"session_id": "id`!*'()", "profile": "roy`!*'()", "title": "[x](javascript:evil) <img> &amp;\nnext"},
+    }])[0]
+    assert result["writes"] == [_reference(
+        r"\[x\]\(javascript:evil\) \<img\> &amp;amp; next",
+        "roy%60%21%2A%27%28%29", "id%60%21%2A%27%28%29",
+        "https://host.test/session/id%60%21%2A%27%28%29",
+    )]
+
+
+@pytest.mark.parametrize("exec_result", [True, False])
+def test_copy_link_without_clipboard_api_uses_fallback(exec_result):
+    result = _run_copy_link_driver([{
+        "origin": "https://host.test", "mode": "fallback", "execResult": exec_result,
+        "session": {"session_id": "abc", "title": "Topic"},
+    }])[0]
+    assert result["writes"] == []
+    assert result["fallbackWrites"] == [_reference("Topic", "default", "abc", "https://host.test/session/abc")]
+    assert result["toasts"] == [["session_link_copied" if exec_result else "session_link_copy_failedClipboard copy was not completed"]]
+
+
+@pytest.mark.parametrize("failure", ["selectThrows", "execThrows"])
+def test_copy_link_removes_fallback_node_on_exception(failure):
+    result = _run_copy_link_driver([{
+        "origin": "https://host.test", "mode": "fallback", failure: True,
+        "session": {"session_id": "abc", "title": "Topic"},
+    }])[0]
+    assert result["allRemoved"]
+    assert result["toasts"][0][0].startswith("session_link_copy_failed")
+    assert ["session_link_copied"] not in result["toasts"]
+
+
+def test_copy_link_reports_invalid_unicode_without_false_success():
+    result = _run_copy_link_driver([{
+        "origin": "https://host.test", "session": {"session_id": "\ud800"},
+    }])[0]
+    assert result["writes"] == []
+    assert result["toasts"][0][0].startswith("session_link_copy_failed")
+
+
+def test_copy_link_missing_id_does_nothing():
+    result = _run_copy_link_driver([{"origin": "https://host.test", "session": {}}])[0]
+    assert result["writes"] == result["fallbackWrites"] == result["toasts"] == []
+
+
+def test_copied_reference_renders_clickable_without_injected_markup():
+    # Exercise the real Markdown renderer as well as the clipboard producer.
+    from tests.test_issue2768_workspace_links import _render
+
+    result = _run_copy_link_driver([{
+        "origin": "http://example.test",
+        "session": {"session_id": "a/b (c)", "profile": "roy", "title": "[x] <img onerror=evil> &amp; *literal*"},
+    }])[0]
+    html = _render(result["writes"][0])
+    assert 'class="session-link" href="http://example.test/session/a%2Fb%20%28c%29"' in html
+    assert '<code>@session:roy/a%2Fb%20%28c%29</code>' in html
+    assert '<img' not in html
+    assert 'href="javascript:' not in html
+    assert ' onerror="' not in html
 
 
 def test_copy_link_is_separate_from_public_share_flow():
@@ -221,12 +301,13 @@ def test_conversation_filter_extracts_session_ids_from_links_raw_ids_and_profile
         {"query": "session://abc%28def%29", "sessions": sessions},
         {"query": "[Target · @session:default/12f0ef3e1a62](https://example.test/session/12f0ef3e1a62)", "sessions": sessions},
         {"query": "@session:moss/abc%28def%29", "sessions": sessions},
+        {"query": "Internal session: `@session:roy/abc%28def%29`", "sessions": sessions},
     ]
     out = _run_session_search_helper(cases)
     assert [row["matches"] for row in out] == [
         ["12f0ef3e1a62"], ["12f0ef3e1a62"], ["12f0ef3e1a62"], ["12f0ef3e1a62"],
         ["12f0ef3e1a62"], ["12f0ef3e1a62"], ["12f0ef3e1a62"], ["12f0ef3e1a62"],
-        ["12f0ef3e1a62"], ["abc(def)"], ["abc(def)"], ["12f0ef3e1a62"], ["abc(def)"],
+        ["12f0ef3e1a62"], ["abc(def)"], ["abc(def)"], ["12f0ef3e1a62"], ["abc(def)"], ["abc(def)"],
     ]
 
 

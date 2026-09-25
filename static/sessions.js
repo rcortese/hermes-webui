@@ -5072,7 +5072,7 @@ function _sessionMarkdownTitle(session){
     .replace(/[\u0000-\u001F\u007F]+/g,' ')
     .replace(/\s+/g,' ')
     .trim()||'Conversation';
-  return title.replace(/([\\`*_{}\[\]()#+\-.!<>|~])/g,'\\$1');
+  return title.replace(/&/g,'&amp;').replace(/([\\`*_{}\[\]()#+\-.!<>|~])/g,'\\$1');
 }
 
 function _sessionMarkdownLabel(session){
@@ -5084,7 +5084,7 @@ function _sessionMarkdownLabel(session){
 }
 
 function _sessionMarkdownUrlSid(sid){
-  return encodeURIComponent(String(sid||'')).replace(/[()]/g, ch => ch==='('?'%28':'%29');
+  return encodeURIComponent(String(sid||'')).replace(/[!'()*]/g, ch => '%'+ch.charCodeAt(0).toString(16).toUpperCase());
 }
 
 function _sessionInternalReferenceForSession(session){
@@ -5108,7 +5108,9 @@ function _sessionCopyLinkText(session){
   const path=new URL(_sessionUrlForSid(sid),window.location.origin);
   path.search='';
   path.hash='';
-  return `[${_sessionMarkdownTitle(session)} · ${locator}](${path.href})`;
+  // Reference data, not retrieval instructions: keep the internal locator
+  // separate from the clickable WebUI link when pasted into another session.
+  return `Conversation reference: [${_sessionMarkdownTitle(session)}](${path.href})\nInternal session: \`${locator}\``;
 }
 
 async function _copyTextToClipboard(text){
@@ -5125,8 +5127,8 @@ async function _copyTextToClipboard(text){
   ta.style.left='-9999px';
   ta.style.top='0';
   document.body.appendChild(ta);
-  ta.select();
   try{
+    ta.select();
     const copied=document.execCommand('copy');
     if(!copied) throw new Error('Clipboard copy was not completed');
     return true;
@@ -5135,9 +5137,9 @@ async function _copyTextToClipboard(text){
 }
 
 async function _copySessionLink(session){
-  const ref=_sessionCopyLinkText(session);
-  if(!ref) return;
   try{
+    const ref=_sessionCopyLinkText(session);
+    if(!ref) return;
     const copied=await _copyTextToClipboard(ref);
     if(!copied) throw new Error('Clipboard copy was not completed');
     showToast(t('session_link_copied'));
@@ -7134,7 +7136,7 @@ function _sessionSearchSessionIdCandidates(query){
   const sessionSchemeRe=/session:\/\/([^\s)>\]]+)/gi;
   while((match=sessionSchemeRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[1]);
 
-  const sessionLocatorRe=/@session:[^/\s]+\/([^\s)\]>]+)/gi;
+  const sessionLocatorRe=/@session:[^/\s`]+\/([^\s)\]>`]+)/gi;
   while((match=sessionLocatorRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[1]);
 
   const urlRe=/(?:https?:\/\/[^\s<>\]]+|\/session\/[^\s<>\]]+|\?[^\s<>\]]+)/gi;
