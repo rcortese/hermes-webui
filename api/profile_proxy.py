@@ -89,6 +89,9 @@ def profile_proxy_entries(config_data=None, environ: dict[str, str] | None = Non
 
 
 def profile_proxy_for(name: str, config_data=None, environ: dict[str, str] | None = None) -> dict | None:
+    if config_data is None and environ is None:
+        from api.config import get_config
+        config_data = get_config()
     return profile_proxy_entries(config_data, environ).get(profile_name_key(name))
 
 

@@ -1,6 +1,6 @@
 # Deployment extensions in this fork
 
-This fork carries a small set of deployment-oriented extensions on top of Hermes WebUI `v0.52.113`. They support installations where one WebUI presents local profiles alongside profiles owned by separate Hermes Gateway instances.
+This fork carries a small set of deployment-oriented extensions on top of Hermes WebUI `exp-v0.52.379`. They support installations where one WebUI presents local profiles alongside profiles owned by separate Hermes Gateway instances.
 
 These features are optional. A normal single-instance installation continues to use local, in-process chat unless Gateway mode or a remote profile proxy is explicitly configured.
 
@@ -102,7 +102,33 @@ The `v0.52.113` transcript evaluator can still misclassify a successful turn as 
 
 The bridge deliberately does not treat an arbitrary older same-text user row as the current turn. That negative case remains terminal so a replayed historical assistant message cannot satisfy a new retry.
 
-This is a narrow evaluator compatibility bridge, not a universal turn-ownership mechanism. Upstream `v0.52.113` carries stronger turn identity and merge ownership, but the terminal evaluator still needs this exact display-tail boundary case. Remove the bridge only when a later stable release passes both the eager-checkpoint positive regression and the historical same-text negative regression without it.
+The prerelease retains upstream's explicit active-turn identity as authoritative. The compatibility bridge applies only when no explicit identity exists; it recognizes an exact checkpointed display-tail user, never an older same-text user. Positive, historical-negative and explicit-new-identity regressions cover these boundaries.
+
+## Prerelease integration
+
+The upstream `legacy` local-worker backend tag remains unchanged: cancellation and Steer use it as an ownership discriminator. Gateway admission idempotency, restart reattachment, approval capability negotiation, profile-aware cache invalidation, and regeneration transactions are retained. Remote target resolution also reaches regeneration and restart reattachment. Approval events prefer Agent `request_id`; replies carry both `request_id` and the compatibility `approval_id`.
+
+Copy conversation links produce reference data ready to paste into another session:
+
+```text
+Conversation reference: [Storage migration](https://webui.example/session/abc123)
+Internal session: `@session:moss/abc123`
+```
+
+The title stays clickable for people; the separate internal locator identifies the profile and conversation without making the URL a retrieval instruction. This is not a public share and does not grant access. The conversation's profile takes precedence over the active selector, with `default` as the last fallback. Titles are escaped, identifiers are URL-encoded, and the WebUI mount subpath is retained; query parameters (including PWA launch metadata) and fragments are omitted. Clipboard rejection uses the legacy copy fallback and reports failure rather than false success if both methods fail.
+
+Paste your new request alongside the reference. Title-generation prompts prioritize that new substantive intent; the old title is context and only a fallback when no new topic is supplied. This guides title generation, not the agent's tools or policies, and cannot guarantee what a model will choose to retrieve.
+
+## Deployment-selected Moss memory integration
+
+This common source line carries profile-local model picker curation (see [local-model-catalog.md](local-model-catalog.md)) and the authenticated browser memory bridge from the Moss image. The process-start environment variable `HERMES_WEBUI_MOSS_MEMORY_GATE` selects only this technical integration:
+
+- `enabled` (also the default when unset): require the existing `agent.moss_memory_gate` module. Moss deployments must use this mode. Missing/broken imports prevent route loading; there is no automatic ungated fallback.
+- `disabled`: explicitly select the pre-existing non-memory-bridge behavior for deployments such as Roy with Agent 0.21.4, which does not carry that module. WebUI does not import the gate, capture browser memory admission, or sign memory proofs. Stale memory proof headers are removed before Runs API submission; ordinary Gateway authentication/session headers remain unchanged.
+
+Only those exact values are accepted; empty or unknown values fail startup. This is a process-wide deployment setting, not a per-profile/browser setting, and requires a restart to change. Do not disable it to work around a broken Moss deployment. It does not select an identity, modify memory rules, copy policy/keys, or alter Agent-side memory behavior. For Docker, set it explicitly in the WebUI service's `environment` (a Compose `.env` alone does not inject arbitrary variables). No runtime configuration is changed by merging this source.
+
+Password login records its authentication type. Only the gate's admitted browser context, a local Gateway target, source `webui`, and a non-goal turn can forward memory admission. Normal and regenerated turns use the same restriction. Service launches, remote proxies, cron/goals, and restart re-admission cannot mint browser authority. Signing happens over the exact serialized Runs API request while retaining upstream's `Idempotency-Key`. Neither the memory proof nor the browser admission is persisted in the Gateway restart record. Gate policy, key custody and the receiving Agent remain external deployment prerequisites.
 
 ## Validation and activation boundary
 

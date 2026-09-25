@@ -15,8 +15,8 @@ def _remote_env() -> dict[str, str]:
 def test_execution_targets_are_canonical_and_remote_is_fail_closed():
     from api.gateway_chat import resolve_execution_target, webui_chat_backend_mode
 
-    assert webui_chat_backend_mode({}, {}) == "local-direct"
-    assert webui_chat_backend_mode({}, {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"}) == "local-direct"
+    assert webui_chat_backend_mode({}, {}) == "legacy"
+    assert webui_chat_backend_mode({}, {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"}) == "legacy"
     remote = resolve_execution_target("ROY", local_gateway_enabled=False, environ={**_remote_env(), "HERMES_WEBUI_PROFILE_PROXY_ROY_API_KEY": "remote-test-key"}, profiles=[])
     assert remote["ok"] is True
     assert remote["execution_target"] == "remote_gateway"
@@ -208,7 +208,7 @@ def test_service_launch_auth_bypass_is_post_only_and_exact(monkeypatch):
     import server
 
     calls = []
-    monkeypatch.setattr(server, "check_auth", lambda _handler, _parsed: calls.append(True) or True)
+    monkeypatch.setattr(server, "check_auth_or_close", lambda _handler, _parsed: calls.append(True) or True)
 
     def fake_route(_handler, _parsed):
         return True

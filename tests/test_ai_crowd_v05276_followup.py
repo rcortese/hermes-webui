@@ -100,7 +100,7 @@ def test_authenticated_remote_selector_switch_binds_remote_identity_and_new_turn
     monkeypatch.setattr(routes, "bad", lambda _handler, message, status=400: responses.append((status, {"error": message}, {})))
     monkeypatch.setattr("api.auth.ensure_trusted_auth_session", lambda _handler: {"bound_profile": None})
     monkeypatch.setattr("api.helpers.build_profile_cookie", lambda name, **_kwargs: f"profile={name}")
-    monkeypatch.setattr("api.config.invalidate_models_cache", lambda: None)
+    monkeypatch.setattr("api.config.invalidate_models_cache", lambda **_kwargs: None)
     monkeypatch.setattr("api.gateway_watcher.restart_watcher_for_profile", lambda _name: None)
     monkeypatch.setattr(profiles, "remote_profile_selector", lambda name: {"name": "roy", "active": "roy", "default_model": "remote-model", "default_workspace": "/safe/workspace"} if name.casefold() == "roy" else None)
     monkeypatch.setattr("api.profile_proxy.profile_proxy_for", lambda name, *_args: {"name": "roy", "api_key_configured": True, "api_key": "remote-test-key", "base_url": "http://remote.invalid:8645", "remote_profile": "roy-persona"} if name.casefold() == "roy" else None)

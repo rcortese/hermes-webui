@@ -135,7 +135,14 @@ def test_eager_checkpointed_current_user_with_final_answer_is_not_silent_failure
 def test_merged_wrapper_delegates_to_turn_evaluator():
     calls = []
 
-    def _fake_evaluator(merged_messages, previous_display, msg_text, source="webui", drop_replayed_assistant=False):
+    def _fake_evaluator(
+        merged_messages,
+        previous_display,
+        msg_text,
+        source="webui",
+        drop_replayed_assistant=False,
+        active_turn_identity=None,
+    ):
         calls.append(
             {
                 "merged_len": len(list(merged_messages or [])),
@@ -143,6 +150,7 @@ def test_merged_wrapper_delegates_to_turn_evaluator():
                 "msg_text": msg_text,
                 "source": source,
                 "drop_replayed_assistant": drop_replayed_assistant,
+                "active_turn_identity": active_turn_identity,
             }
         )
         return True
@@ -167,4 +175,5 @@ def test_merged_wrapper_delegates_to_turn_evaluator():
     assert calls[0]["msg_text"] == "hello"
     assert calls[0]["source"] == "cli"
     assert calls[0]["drop_replayed_assistant"] is True
+    assert calls[0]["active_turn_identity"] is None
     assert calls[0]["merged_len"] >= 1

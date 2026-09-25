@@ -696,7 +696,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
         "_resolve_compatible_session_model_state",
         lambda model, provider, **_: (model, provider, False),
     )
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     import api.gateway_chat as gateway_chat
     monkeypatch.setattr(
@@ -706,6 +706,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     )
 
     started_threads = []
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_kwargs: [{"name": "work"}])
 
     class FakeThread:
         def __init__(self, *args, **kwargs):
@@ -774,7 +775,7 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
         "_resolve_compatible_session_model_state",
         lambda model, provider, **_: (model, provider, False),
     )
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
 
     class FakeThread:
