@@ -106,7 +106,7 @@ The prerelease retains upstream's explicit active-turn identity as authoritative
 
 ## Prerelease integration
 
-The upstream `legacy` local-worker backend tag remains unchanged: cancellation and Steer use it as an ownership discriminator. Gateway admission idempotency, restart reattachment, approval capability negotiation, profile-aware cache invalidation, and regeneration transactions are retained. Remote target resolution also reaches regeneration and restart reattachment. Approval events prefer Agent `request_id`; replies carry both `request_id` and the compatibility `approval_id`.
+The upstream `legacy` local-worker backend tag remains unchanged: cancellation and Steer use it as an ownership discriminator. Gateway admission idempotency, restart reattachment, approval capability negotiation, profile-aware cache invalidation, and regeneration transactions are retained. Remote target resolution also reaches regeneration and restart reattachment. Approval events prefer Agent `request_id`; replies carry `request_id` only when an Agent request identity is available, while retaining the compatibility `approval_id`. An explicit empty `request_id` is rejected by the Gateway Runs endpoint.
 
 Copy conversation links produce reference data ready to paste into another session:
 

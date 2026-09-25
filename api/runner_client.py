@@ -80,10 +80,14 @@ class HttpRunnerClient:
         return self._post(f"/v1/runs/{urllib.parse.quote(str(run_id), safe='')}/cancel", {})
 
     def respond_approval(self, run_id: str, approval_id: str, choice: str) -> dict[str, Any]:
+        body = {"choice": choice, "approval_id": approval_id}
+        # The fallback with no Agent request identity must not send an explicit
+        # empty request_id: the Runs endpoint rejects it as invalid.
+        if approval_id:
+            body["request_id"] = approval_id
         return self._post(
             f"/v1/runs/{urllib.parse.quote(str(run_id), safe='')}/approval",
-            # Current Agent runs target request_id; retain the legacy wire key.
-            {"choice": choice, "approval_id": approval_id, "request_id": approval_id},
+            body,
         )
 
     def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> dict[str, Any]:
