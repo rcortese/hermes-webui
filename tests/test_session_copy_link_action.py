@@ -96,7 +96,7 @@ def _run_copy_link_driver(cases):
 
 
 def _reference(title, profile, sid, url):
-    return f"Conversation reference: [{title}]({url})\nInternal session: `@session:{profile}/{sid}`"
+    return f"[{title}]({url}) · `@session:{profile}/{sid}`"
 
 
 def test_copy_link_writes_exact_markdown_payload_for_default_profile():

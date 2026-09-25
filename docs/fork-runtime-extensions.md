@@ -111,11 +111,10 @@ The upstream `legacy` local-worker backend tag remains unchanged: cancellation a
 Copy conversation links produce reference data ready to paste into another session:
 
 ```text
-Conversation reference: [Storage migration](https://webui.example/session/abc123)
-Internal session: `@session:moss/abc123`
+[Storage migration](https://webui.example/session/abc123) · `@session:moss/abc123`
 ```
 
-The title stays clickable for people; the separate internal locator identifies the profile and conversation without making the URL a retrieval instruction. This is not a public share and does not grant access. The conversation's profile takes precedence over the active selector, with `default` as the last fallback. Titles are escaped, identifiers are URL-encoded, and the WebUI mount subpath is retained; query parameters (including PWA launch metadata) and fragments are omitted. Clipboard rejection uses the legacy copy fallback and reports failure rather than false success if both methods fail.
+The compact, single-line reference keeps the title clickable for people; the distinct internal locator identifies the profile and conversation without making the URL a retrieval instruction. This is not a public share and does not grant access. The conversation's profile takes precedence over the active selector, with `default` as the last fallback. Titles are escaped, identifiers are URL-encoded, and the WebUI mount subpath is retained; query parameters (including PWA launch metadata) and fragments are omitted. Clipboard rejection uses the legacy copy fallback and reports failure rather than false success if both methods fail.
 
 Paste your new request alongside the reference. Title-generation prompts prioritize that new substantive intent; the old title is context and only a fallback when no new topic is supplied. This guides title generation, not the agent's tools or policies, and cannot guarantee what a model will choose to retrieve.
 

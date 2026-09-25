@@ -5108,9 +5108,9 @@ function _sessionCopyLinkText(session){
   const path=new URL(_sessionUrlForSid(sid),window.location.origin);
   path.search='';
   path.hash='';
-  // Reference data, not retrieval instructions: keep the internal locator
-  // separate from the clickable WebUI link when pasted into another session.
-  return `Conversation reference: [${_sessionMarkdownTitle(session)}](${path.href})\nInternal session: \`${locator}\``;
+  // One compact line: a clickable title for people and a distinct locator
+  // for agent/session lookup. Neither is an instruction or a public share.
+  return `[${_sessionMarkdownTitle(session)}](${path.href}) · \`${locator}\``;
 }
 
 async function _copyTextToClipboard(text){

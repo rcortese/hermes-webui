@@ -20,10 +20,7 @@ def test_title_prompts_prioritize_substantive_topic_over_workflow():
 
 
 def test_pasted_reference_keeps_new_intent_and_old_title_as_fallback():
-    reference = (
-        "Conversation reference: [Storage audit](https://host.test/session/abc)\n"
-        "Internal session: `@session:moss/abc`"
-    )
+    reference = "[Storage audit](https://host.test/session/abc) · `@session:moss/abc`"
     for question in [reference, reference + "\nAgora planeje a migração do banco de dados."]:
         qa, prompts = _title_prompts(question, "")
         assert question in qa
