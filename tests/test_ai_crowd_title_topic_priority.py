@@ -1,6 +1,7 @@
 """Regression coverage for topic-first session title prompts."""
 
-from api.streaming import _title_prompts
+from api.models import title_from, title_subject_from_message
+from api.streaming import _fallback_title_from_exchange, _title_prompts
 
 
 def test_title_prompts_prioritize_substantive_topic_over_workflow():
@@ -21,12 +22,38 @@ def test_title_prompts_prioritize_substantive_topic_over_workflow():
 
 def test_pasted_reference_keeps_new_intent_and_old_title_as_fallback():
     reference = "[Storage audit](https://host.test/session/abc) · `@session:moss/abc`"
-    for question in [reference, reference + "\nAgora planeje a migração do banco de dados."]:
-        qa, prompts = _title_prompts(question, "")
-        assert question in qa
-        assert all("a new substantive intent takes precedence" in p for p in prompts)
-        assert all("an old title is only a fallback" in p for p in prompts)
-        assert all("only when the user explicitly asks about them" in p for p in prompts)
+    qa, prompts = _title_prompts(reference, "")
+    assert "User question:\nStorage audit" in qa
+    qa, _ = _title_prompts(reference + "\nAgora planeje a migração do banco de dados.", "")
+    assert "User question:\nAgora planeje a migração do banco de dados." in qa
+    assert "Previous conversation topic (context only): Storage audit" in qa
+    for prompt in prompts:
+        assert "a new substantive intent takes precedence" in prompt
+        assert "an old title is only a fallback" in prompt
+        assert "only when the user explicitly asks about them" in prompt
+
+
+def test_copied_reference_does_not_become_provisional_or_fallback_title():
+    reference = (
+        "Conversation reference: [Teste E2E autorizado em produção por Rodolfo\\. Identificador excl]"
+        "(https://hermes.example/session/b79a286775ff)\n"
+        "Internal session: `@session:moss/b79a286775ff`"
+    )
+    message = reference + "\n\nMelhore a UX dos títulos de conversas copiadas."
+    assert title_from([{"role": "user", "content": message}]) == "Melhore a UX dos títulos de conversas copiadas."
+    assert _fallback_title_from_exchange(message, "") == "Melhore dos títulos conversas"
+    qa, _ = _title_prompts(message, "")
+    assert qa.startswith("User question:\nMelhore a UX dos títulos")
+    assert "Previous conversation topic (context only): Teste E2E autorizado" in qa
+    assert "@session:" not in qa
+    assert title_from([{"role": "user", "content": reference}]).startswith("Teste E2E autorizado")
+
+
+def test_compact_reference_and_non_reference_prose_preserve_intent():
+    compact = "[Old topic](https://host.test/session/abc) · `@session:roy/abc`"
+    assert title_from([{"role": "user", "content": compact + "\nNovo assunto: backup."}]) == "Novo assunto: backup."
+    assert title_subject_from_message("Analise [a fonte](https://host.test/session/abc) agora") == "Analise [a fonte](https://host.test/session/abc) agora"
+    assert title_subject_from_message("[externo](https://host.test/article/abc) e explique") == "[externo](https://host.test/article/abc) e explique"
 
 
 def test_title_prompts_preserve_language_and_output_guards():

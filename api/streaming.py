@@ -2988,7 +2988,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
-from api.models import get_session, title_from
+from api.models import get_session, title_from, title_subject_from_message
 from api.workspace import _resolve_path
 
 # Fields that are safe to send to LLM provider APIs.
@@ -4742,8 +4742,16 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
+    subject = title_subject_from_message(user_text)
+    # Place the actual request first; retain the old topic as context, never as
+    # the first 500 characters of the question that the title model sees.
+    context = ''
+    if subject != user_text.strip():
+        previous = title_subject_from_message(user_text.split('\n', 1)[0])
+        if previous != user_text.split('\n', 1)[0].strip() and previous != subject:
+            context = f"\nPrevious conversation topic (context only): {previous[:120]}"
+    qa = f"User question:\n{subject[:500]}{context}\n\nAssistant answer:\n{assistant_text[:500]}"
+    language_rule = _title_prompt_language_rule(subject)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
@@ -5308,6 +5316,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     if not user_text:
         return None
     user_text = _strip_workspace_prefix(user_text)
+    user_text = title_subject_from_message(user_text)
     user_text = re.sub(r'\s+', ' ', user_text).strip()
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()

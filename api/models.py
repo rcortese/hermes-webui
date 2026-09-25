@@ -7181,6 +7181,27 @@ def _strip_attached_files_marker(text: str) -> str:
     return re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", str(text or "")).strip()
 
 
+_COPIED_SESSION_LINK_RE = re.compile(
+    r'^\s*(?:Conversation reference:\s*)?\[((?:\\.|[^\\\]\n])+)\]'
+    r'\(https?://[^\s)]+/session/[^\s)]+\)'
+    r'(?:\s*·\s*`@session:[^`\n]+`)?\s*', re.I
+)
+_COPIED_SESSION_LOCATOR_RE = re.compile(
+    r'^Internal session:\s*`?@session:[^`\s]+`?\s*', re.I
+)
+
+
+def title_subject_from_message(text: str) -> str:
+    """Prefer a new request over a leading copied WebUI session reference."""
+    text = str(text or '').strip()
+    match = _COPIED_SESSION_LINK_RE.match(text)
+    if not match:
+        return text
+    old_title = re.sub(r'\\([\\`*_{}\[\]()#+\-.!<>|~])', r'\1', match.group(1))
+    remainder = _COPIED_SESSION_LOCATOR_RE.sub('', text[match.end():].strip(), count=1).strip()
+    return remainder or old_title
+
+
 def title_from(messages, fallback: str='Untitled'):
     """Derive a session title from the first user message."""
     for m in messages:
@@ -7190,7 +7211,7 @@ def title_from(messages, fallback: str='Untitled'):
                 continue
             if isinstance(c, list):
                 c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = _strip_attached_files_marker(str(c))
+            text = title_subject_from_message(_strip_attached_files_marker(str(c)))
             if text:
                 return text[:64]
     return fallback

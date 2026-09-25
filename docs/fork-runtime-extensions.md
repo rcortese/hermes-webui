@@ -94,7 +94,7 @@ Gateway-backed usage shows a context percentage only when a positive context-win
 
 ## Session titles
 
-Automatic title prompts prioritize the conversation's substantive topic and intent over workflow words such as “audit,” “review,” “handoff,” or a tool name. Workflow terminology remains eligible when it is itself the central subject. Existing language, length, and title-only output guards remain in force.
+Automatic title prompts prioritize the conversation's substantive topic and intent over workflow words such as “audit,” “review,” “handoff,” or a tool name. Workflow terminology remains eligible when it is itself the central subject. When a first message begins with a copied WebUI conversation link (the compact link plus locator or the older two-line reference), the provisional title, model title input, and local fallback use the new request instead of the reference prefix; a reference-only message uses the linked conversation's title. The message itself is never rewritten, and ordinary links or links embedded in prose retain their existing behavior. Existing language, length, and title-only output guards remain in force.
 
 ## `no response` compatibility bridge
 
