@@ -1,7 +1,12 @@
 """Regression coverage for topic-first session title prompts."""
 
 from api.models import title_from, title_subject_from_message
-from api.streaming import _fallback_title_from_exchange, _title_prompts
+from api.streaming import (
+    _background_title_generation_inputs,
+    _fallback_title_from_exchange,
+    _title_prompts,
+)
+from types import SimpleNamespace
 
 
 def test_title_prompts_prioritize_substantive_topic_over_workflow():
@@ -47,6 +52,12 @@ def test_copied_reference_does_not_become_provisional_or_fallback_title():
     assert "Previous conversation topic (context only): Teste E2E autorizado" in qa
     assert "@session:" not in qa
     assert title_from([{"role": "user", "content": reference}]).startswith("Teste E2E autorizado")
+    messages = [{"role": "user", "content": message}, {"role": "assistant", "content": "Vou ajustar a UX."}]
+    session = SimpleNamespace(messages=messages, title=title_from(messages), llm_title_generated=False)
+    inputs = _background_title_generation_inputs(session)
+    assert inputs is not None
+    assert inputs[0].startswith("Conversation reference:")
+    assert _title_prompts(*inputs)[0].startswith("User question:\nMelhore a UX")
 
 
 def test_compact_reference_and_non_reference_prose_preserve_intent():
