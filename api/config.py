@@ -7657,13 +7657,15 @@ def _get_models_cache_path(profile: str | None = None) -> Path:
 
 
 def _get_auth_store_path() -> Path:
-    """Return the auth.json path for the active Hermes profile."""
+    """Return the effective auth store, independently of the profile identity."""
+    from api.oauth import get_shared_auth_path
+
     try:
         from api.profiles import get_active_hermes_home as _gah
 
-        return _gah() / "auth.json"
+        return get_shared_auth_path(_gah())
     except ImportError:
-        return _DEFAULT_HERMES_HOME / "auth.json"
+        return get_shared_auth_path(_DEFAULT_HERMES_HOME)
 
 
 def _models_cache_file_fingerprint(path: Path) -> dict:
