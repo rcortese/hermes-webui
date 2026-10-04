@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api.http import credentialed_urlopen
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
@@ -7663,13 +7664,15 @@ def _get_models_cache_path(profile: str | None = None) -> Path:
 
 
 def _get_auth_store_path() -> Path:
-    """Return the auth.json path for the active Hermes profile."""
+    """Return the effective auth store, independently of the profile identity."""
+    from api.oauth import get_shared_auth_path
+
     try:
         from api.profiles import get_active_hermes_home as _gah
 
-        return _gah() / "auth.json"
+        return get_shared_auth_path(_gah())
     except ImportError:
-        return _DEFAULT_HERMES_HOME / "auth.json"
+        return get_shared_auth_path(_DEFAULT_HERMES_HOME)
 
 
 def _models_cache_file_fingerprint(path: Path) -> dict:
@@ -11516,7 +11519,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(f"{base_url}/v1/capabilities", headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with credentialed_urlopen(req, timeout=3) as resp:
             caps["capabilities_reachable"] = True
             body = json.loads(resp.read(65536))
         features = body.get("features") if isinstance(body, dict) else {}

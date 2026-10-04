@@ -3168,7 +3168,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
-from api.models import get_session, title_from
+from api.models import get_session, title_from, title_subject_from_message
 from api.workspace import _resolve_path
 
 # Fields that are safe to send to LLM provider APIs.
@@ -5559,16 +5559,31 @@ def _generated_title_language_mismatch(user_text: str, title: str, pinned_langua
     pinned_scripts = _resolve_pinned_title_scripts(pinned_language)
     if pinned_scripts:
         return _script_drift(title, pinned_scripts)
-    return _title_language_mismatch(user_text, title)
+    return _title_language_mismatch(title_subject_from_message(user_text), title)
 
 
 def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
-    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text, pinned_language)
+    subject = title_subject_from_message(user_text)
+    # Place the actual request first; retain the old topic as context, never as
+    # the first 500 characters of the question that the title model sees.
+    context = ''
+    if subject != user_text.strip():
+        previous = title_subject_from_message(user_text.split('\n', 1)[0])
+        if previous != user_text.split('\n', 1)[0].strip() and previous != subject:
+            context = f"\nPrevious conversation topic (context only): {previous[:120]}"
+    qa = f"User question:\n{subject[:500]}{context}\n\nAssistant answer:\n{assistant_text[:500]}"
+    language_rule = _title_prompt_language_rule(subject, pinned_language)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Identify the main topic and substantive intent. Prioritize what the conversation seeks "
+            "to resolve, decide, explain, create, or investigate.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
+            "Treat pasted references, URLs, profile names, and session IDs as non-binding transport/context; "
+            "a new substantive intent takes precedence, and an old title is only a fallback. "
+            "Make links or references the subject only when the user explicitly asks about them.\n"
             f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -5580,7 +5595,12 @@ def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optiona
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
-            "Use the actual topic, not the task outcome.\n"
+            "Use the actual substantive topic and intent, not merely the task outcome or workflow.\n"
+            "Do not prioritize method, format, tool, role, audit, review, handoff, or process step "
+            "unless it is itself the central subject.\n"
+            "Treat pasted references, URLs, profile names, and session IDs as non-binding transport/context; "
+            "a new substantive intent takes precedence, and an old title is only a fallback. "
+            "Make links or references the subject only when the user explicitly asks about them.\n"
             f"{language_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -6129,6 +6149,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     if not user_text:
         return None
     user_text = _strip_workspace_prefix(user_text)
+    user_text = title_subject_from_message(user_text)
     user_text = re.sub(r'\s+', ' ', user_text).strip()
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()
@@ -8978,9 +8999,17 @@ def _turn_transcript_lacks_final_assistant_answer(
     current_user_idx = current_user_token_idx
     if current_user_idx is None:
         current_user_idx = _find_current_user_turn(merged_messages, msg_text)
+    checkpointed_current_user = bool(
+        not active_turn_identity
+        and current_user_idx is not None
+        and current_user_idx == len(previous_display) - 1
+        and previous_display
+        and _message_identity(merged_messages[current_user_idx]) == _message_identity(previous_display[-1])
+    )
     if current_user_idx is None or (
         current_user_token_idx is None
         and current_user_idx < len(previous_display)
+        and not checkpointed_current_user
     ):
         # The active turn lives after the durable transcript boundary. If the
         # merged display only exposes an older user row, materialize the pending

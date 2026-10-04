@@ -483,6 +483,45 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
 )
 
 
+def _remote_cron_proxy_unsupported_payload(proxy: dict | None = None) -> dict:
+    """Return a secret-free refusal instead of touching Moss-local cron state."""
+    proxy = proxy or {}
+    return {
+        "error": "remote_cron_proxy_unsupported",
+        "profile_kind": "remote_gateway_proxy",
+        "remote_proxy": True,
+        "backend": "unsupported_remote",
+        "profile": proxy.get("name"),
+        "label": proxy.get("label") or proxy.get("name"),
+        "message": (
+            "Cron operations for remote profile proxies are not supported here. "
+            "Moss-local cron jobs were not read or modified"
+        ),
+    }
+
+
+def _active_remote_cron_proxy() -> dict | None:
+    active_profile = "unknown"
+    try:
+        from api.config import get_config
+        from api.profile_proxy import profile_proxy_for
+
+        active_profile = str(get_active_profile_name() or "unknown")
+        return profile_proxy_for(active_profile, get_config())
+    except Exception:
+        # Cron is a mutating local capability. If remote-target classification
+        # cannot be established, block rather than risking Moss-local cron state.
+        return {"name": active_profile, "label": active_profile}
+
+
+def _guard_remote_cron_proxy(handler) -> bool:
+    proxy = _active_remote_cron_proxy()
+    if proxy is None:
+        return False
+    j(handler, _remote_cron_proxy_unsupported_payload(proxy))
+    return True
+
+
 def _all_profiles_query_flag(parsed_url) -> bool:
     """Return True if the request URL has `?all_profiles=1` (or true/yes).
 
@@ -6163,8 +6202,11 @@ def apply_cors_preflight_headers(handler) -> None:
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 
-def _csrf_exempt_path(path: str) -> bool:
+def _csrf_exempt_path(path: str, method: str = "POST") -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
+    from api.service_session_launch import is_service_launch_path
+    if is_service_launch_path(path) and method == "POST":
+        return True  # independently bearer-authorized; never browser-cookie authority
     return path in {
         "/api/auth/login",
         "/api/auth/passkey/options",
@@ -14623,6 +14665,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
+        from api.model_catalog import apply_local_catalog
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
         # the detached rebuild worker (and the legacy synchronous rebuild),
@@ -14635,10 +14678,10 @@ def handle_get(handler, parsed) -> bool:
             if freshness == "session_visit":
                 result = get_available_models_for_session_visit()
                 diag.stage("response_serialize") if diag else None
-                return j(handler, result)
+                return j(handler, apply_local_catalog(result))
             if freshness:
                 return bad(handler, f"unknown models freshness: {freshness}", status=400)
-            return j(handler, get_available_models())
+            return j(handler, apply_local_catalog(get_available_models()))
         finally:
             if diag:
                 diag.finish()
@@ -15300,6 +15343,8 @@ def handle_get(handler, parsed) -> bool:
     # aggregates per visible profile home so the UI can surface hidden-row
     # counts and, when opted in, read-only foreign rows.
     if parsed.path == "/api/crons":
+        if _guard_remote_cron_proxy(handler):
+            return True
         # #4768: in split-container / minimal Docker deployments the WebUI image may
         # not ship the agent's `cron` package on its import path. Degrade gracefully
         # (empty list + cron_unavailable flag) instead of 500ing the whole Task tab.
@@ -15325,6 +15370,8 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/crons/output":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15332,6 +15379,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15339,6 +15388,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15346,6 +15397,8 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15353,12 +15406,16 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -15945,6 +16002,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/internal/session-launch":
+        from api.service_session_launch import handle_service_session_launch
+        return handle_service_session_launch(handler, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -17417,6 +17478,8 @@ def handle_post(handler, parsed) -> bool:
     # See GET-side comment above: wrap in cron_profile_context so writes go
     # to the TLS-active profile's jobs.json instead of the process default.
     if parsed.path == "/api/crons/create":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17424,6 +17487,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17431,6 +17496,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17438,6 +17505,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17445,6 +17514,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17452,6 +17523,8 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
+        if _guard_remote_cron_proxy(handler):
+            return True
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -17613,9 +17686,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.auth import ensure_trusted_auth_session
-            from api.profiles import switch_profile, _validate_profile_name
+            from api.profiles import remote_profile_selector, switch_profile, _validate_profile_name
+            from api.profile_proxy import profile_proxy_for
             from api.helpers import build_profile_cookie
-            if name != 'default':
+            remote = remote_profile_selector(name)
+            if profile_proxy_for(name) and remote is None:
+                return bad(handler, "selected profile is both local and remote", 409)
+            if remote is not None:
+                name = remote["active"]
+            elif name != 'default':
                 _validate_profile_name(name)
             session_info = ensure_trusted_auth_session(handler)
             if getattr(handler, '_trusted_auth_session_rejected', False):
@@ -17623,20 +17702,29 @@ def handle_post(handler, parsed) -> bool:
             bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
             if bound_profile and name != bound_profile:
                 return bad(handler, "Profile is bound to the current session", 403)
-            # process_wide=False: don't mutate the process-global _active_profile.
-            # Per-client profile is managed via cookie + thread-local (#798).
-            result = switch_profile(name, process_wide=False)
+            # Remote selectors are opaque routing identities, never local
+            # profile homes. switch_profile() is exclusively for trusted local
+            # directories; collisions above already failed closed.
+            if remote is not None:
+                result = remote
+            else:
+                # process_wide=False: don't mutate the process-global _active_profile.
+                # Per-client profile is managed via cookie + thread-local (#798).
+                result = switch_profile(name, process_wide=False)
+
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
             # The per-profile disk snapshot is fingerprint-guarded, so keep it.
             from api.config import invalidate_models_cache
             invalidate_models_cache(delete_disk=False)
-            try:
-                from api.gateway_watcher import restart_watcher_for_profile
-                restart_watcher_for_profile(name)
-            except Exception as exc:
-                logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            if remote is None:
+                try:
+                    from api.gateway_watcher import restart_watcher_for_profile
+                    restart_watcher_for_profile(name)
+                except Exception as exc:
+                    logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+
             session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
             if session_cookie_value:
                 if bound_profile and name == bound_profile:
@@ -18466,7 +18554,7 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
+        cookie_val = create_session(auth_type="password")
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -22487,13 +22575,14 @@ def _handle_live_models(handler, parsed):
         provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
+        from api.model_catalog import apply_local_catalog
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
-            return j(handler, cached)
+            return j(handler, apply_local_catalog(cached))
 
         def _finish(payload: dict):
             _set_cached_live_models(cache_key, payload)
-            return j(handler, payload)
+            return j(handler, apply_local_catalog(payload))
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
@@ -24266,6 +24355,8 @@ def _start_regeneration_stream_locked(
     backend_is_gateway: bool,
     persisted_model=None,
     persisted_model_provider=None,
+    gateway_config=None,
+    memory_admission=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -24317,6 +24408,8 @@ def _start_regeneration_stream_locked(
             "goal_related": goal_related,
         }
         worker_kwargs["regeneration"] = True
+        worker_kwargs["gateway_config"] = gateway_config
+        worker_kwargs["memory_admission"] = memory_admission
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
@@ -24620,6 +24713,13 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _moss_gateway_memory_admission(execution_target, source, goal_related):
+    if execution_target.get("execution_target") != "local_gateway" or source != "webui" or goal_related:
+        return None
+    from api.memory_gate import current_admission
+    return current_admission()
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -24651,13 +24751,33 @@ def _start_chat_stream_for_session(
     durable retry, so re-arming for them double-delivered one completion
     (#7680 CORE, maintainer 2026-10-01).
     """
-    if external_runtime_owned is None:
-        external_runtime_owned = webui_gateway_chat_enabled(get_config())
-    backend_is_gateway = bool(external_runtime_owned)
     if persisted_model is None:
         persisted_model = model
     if persisted_model_provider is None:
         persisted_model_provider = model_provider
+    # Resolve ownership before persisting pending state. An unconfigured remote
+    # selection must fail closed without creating a local fallback turn. Resolve
+    # it before the local-runtime revision barrier too: a remote proxy owns its
+    # runtime even when this WebUI's global Gateway mode is disabled.
+    from api.gateway_chat import _gateway_api_key, _gateway_base_url, resolve_execution_target
+    from api.profiles import get_active_profile_name
+    selected_profile = getattr(s, "profile", None) or get_active_profile_name()
+    cfg = get_config()
+    execution_target = resolve_execution_target(
+        selected_profile,
+        local_gateway_enabled=webui_gateway_chat_enabled(cfg) if external_runtime_owned is None else bool(external_runtime_owned),
+        config_data=cfg,
+        profiles=list_profiles_api(include_remote=False),
+        local_gateway_config={
+            "base_url": _gateway_base_url(cfg),
+            "api_key": _gateway_api_key(),
+            "session_key_prefix": "webui",
+        },
+    )
+    if not execution_target.get("ok"):
+        return {"error": execution_target.get("error", "chat target unavailable"), "error_type": execution_target.get("error_type"), "_status": execution_target.get("_status", 404)}
+
+    backend_is_gateway = execution_target["execution_target"] in {"remote_gateway", "local_gateway"}
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -24747,6 +24867,8 @@ def _start_chat_stream_for_session(
                             source=source,
                             moa_config=moa_config,
                             backend_is_gateway=backend_is_gateway,
+                            gateway_config=execution_target.get("gateway_config"),
+                            memory_admission=_moss_gateway_memory_admission(execution_target, source, goal_related),
                         )
                     except Exception:
                         restore_consumed_continuation_markers()
@@ -24846,6 +24968,8 @@ def _start_chat_stream_for_session(
                             "persisted_model": persisted_model,
                             "persisted_model_provider": persisted_model_provider,
                             "goal_related": goal_related,
+                            "gateway_config": execution_target.get("gateway_config"),
+                            "memory_admission": _moss_gateway_memory_admission(execution_target, source, goal_related),
                         }
                     else:
                         worker_kwargs = _local_agent_worker_kwargs(
@@ -24948,6 +25072,7 @@ def _start_chat_stream_for_session(
         except Exception:
             logger.debug("Failed to publish session_new after chat start", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
+
     try:
         set_last_workspace(workspace, profile=getattr(s, "profile", None))
     except Exception:
@@ -26008,6 +26133,10 @@ def _save_chat_start_compression_recovery(session):
     return None
 
 
+from api.memory_gate import capture_browser as _capture_moss_memory_browser
+
+
+@_capture_moss_memory_browser
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None

@@ -668,7 +668,7 @@ def _oauth_payload_has_token(payload: dict) -> bool:
 def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     """Return True if the provider has valid OAuth credentials.
 
-    Reads the profile-scoped auth.json directly so onboarding respects the
+    Reads the effective auth.json: HERMES_AUTH_HOME when set, otherwise the
     requested Hermes home. Known OAuth providers may store auth either in the
     legacy providers[provider_id] singleton state or in credential_pool entries
     used by current Hermes runtime auth resolution.
@@ -685,7 +685,10 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     try:
         import json as _j
 
-        auth_path = hermes_home / "auth.json"
+        from api.oauth import get_shared_auth_path
+
+        # Claude linking writes a profile-local marker, not shared OAuth tokens.
+        auth_path = hermes_home / "auth.json" if provider == "anthropic" else get_shared_auth_path(hermes_home)
         if not auth_path.exists():
             return False
         store = _j.loads(auth_path.read_text(encoding="utf-8"))

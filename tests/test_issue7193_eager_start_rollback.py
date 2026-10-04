@@ -22,6 +22,12 @@ def issue7193_env(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
+    # Admission now resolves local/proxy ownership before touching pending state.
+    # Register this fixture's synthetic local profile without bypassing the real
+    # resolver or the rollback transaction exercised below.
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_kwargs: [
+        {"name": "default"}, {"name": "profile-a"},
+    ])
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)

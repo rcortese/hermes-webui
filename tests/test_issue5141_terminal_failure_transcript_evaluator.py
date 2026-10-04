@@ -90,6 +90,48 @@ def test_turn_evaluator_materializes_pending_user_after_display_boundary():
     ) is True
 
 
+def test_historical_same_text_user_is_not_treated_as_eager_checkpoint():
+    """An older matching prompt cannot satisfy the current turn boundary."""
+    previous_display = [
+        {"role": "user", "content": "follow up"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    merged = list(previous_display)
+
+    assert streaming._turn_transcript_lacks_final_assistant_answer(
+        merged,
+        previous_display,
+        "follow up",
+        source="webui",
+    ) is True
+
+
+def test_eager_checkpointed_current_user_with_final_answer_is_not_silent_failure():
+    """A durable current-user checkpoint must remain the current turn boundary."""
+    previous_display = [{"role": "user", "content": "follow up"}]
+    previous_context = []
+    result_messages = [
+        {"role": "user", "content": "follow up"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "follow up",
+        source="webui",
+    )
+
+    assert [message["role"] for message in merged] == ["user", "assistant"]
+    assert streaming._turn_transcript_lacks_final_assistant_answer(
+        merged,
+        previous_display,
+        "follow up",
+        source="webui",
+    ) is False
+
+
 def test_merged_wrapper_delegates_to_turn_evaluator():
     calls = []
 

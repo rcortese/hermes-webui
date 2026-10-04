@@ -197,6 +197,26 @@ for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_moss_memory_gate_paths(tmp_path):
+    """The optional Agent overlay has fixed paths outside HERMES_HOME.
+
+    Never let unit tests read a deployment's memory policy/key. Tests of the
+    gate can override policy/key behavior explicitly with synthetic inputs.
+    Use a private patch context so the test's monkeypatch teardown order stays
+    unchanged relative to the other autouse fixtures.
+    """
+    try:
+        from agent import moss_memory_gate
+    except ImportError:
+        yield
+        return
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(moss_memory_gate, "POLICY", tmp_path / "memory-policy.json")
+        patch.setattr(moss_memory_gate, "KEY", tmp_path / "memory-gate.key")
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hermes_config_path():
     """Keep profile/.env side effects from leaking the live config path across tests."""
     isolated_config_path = str(TEST_STATE_DIR / 'config.yaml')
@@ -1103,8 +1123,23 @@ def test_server():
     last_reason = ""
     for _attempt in range(1, boot_attempts + 1):
         with open(_server_log, "w", encoding="utf-8") as _logf:
+            # The source gate has fixed production paths, independent of HOME.
+            # Bind synthetic custody paths before any handler can run in this
+            # disposable server; do not disable or stub the required bridge.
+            if HERMES_AGENT and (HERMES_AGENT / "agent/moss_memory_gate.py").is_file():
+                server_command = [VENV_PYTHON, "-c", (
+                    "import sys, pathlib, runpy; "
+                    f"sys.path.insert(0, {str(REPO_ROOT)!r}); "
+                    f"sys.path.insert(0, {str(HERMES_AGENT)!r}); "
+                    "from agent import moss_memory_gate as gate; "
+                    f"gate.POLICY = pathlib.Path({str(TEST_STATE_DIR / 'memory-policy.json')!r}); "
+                    f"gate.KEY = pathlib.Path({str(TEST_STATE_DIR / 'memory-gate.key')!r}); "
+                    f"runpy.run_path({str(SERVER_SCRIPT)!r}, run_name='__main__')"
+                )]
+            else:
+                server_command = [VENV_PYTHON, str(SERVER_SCRIPT)]
             proc = subprocess.Popen(
-                [VENV_PYTHON, str(SERVER_SCRIPT)],
+                server_command,
                 cwd=WORKDIR,
                 env=env,
                 stdout=_logf,

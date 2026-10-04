@@ -2,12 +2,13 @@
 
 The browser receives only WebUI-local flow metadata (flow_id, user_code,
 verification_uri, high-level status). Provider device/auth codes and OAuth
-tokens stay server-side and are persisted to the active Hermes profile's
-``auth.json`` credential_pool.
+tokens stay server-side and are persisted to the effective auth root's
+``auth.json`` credential_pool (HERMES_AUTH_HOME or the active profile).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -176,9 +177,54 @@ def _read_auth_json(auth_path: Path | None = None) -> dict[str, Any]:
     return {}
 
 
+def get_shared_auth_path(hermes_home: Path) -> Path:
+    """Honor the runtime auth-root override without changing profile identity."""
+    override = os.environ.get("HERMES_AUTH_HOME", "").strip()
+    root = Path(override).expanduser() if override else Path(hermes_home)
+    return root / "auth.json"
+
+
 def read_auth_json():
-    """Public wrapper for streaming credential self-heal code."""
-    return _read_auth_json()
+    """Read the effective auth store for streaming credential self-heal."""
+    return _read_auth_json(get_shared_auth_path(_get_active_hermes_home()))
+
+
+def _read_auth_json_strict(auth_path: Path) -> dict[str, Any]:
+    """Reject malformed login stores; never turn corruption into an empty pool."""
+    try:
+        loaded = json.loads(auth_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {}
+    except (ValueError, UnicodeError) as exc:
+        raise RuntimeError("Refusing to write malformed auth store") from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError("Refusing to write non-object auth store")
+    if "credential_pool" in loaded and not isinstance(loaded["credential_pool"], dict):
+        raise RuntimeError("Refusing to write invalid credential pool")
+    pool = loaded.get("credential_pool", {})
+    if "openai-codex" in pool and not isinstance(pool["openai-codex"], list):
+        raise RuntimeError("Refusing to write invalid Codex pool")
+    return loaded
+
+
+def _principal_identity(access_token: Any) -> tuple[str, str] | None:
+    """Route by JWT claims only; decoding does not validate a signature or grant."""
+    if not isinstance(access_token, str):
+        return None
+    try:
+        parts = access_token.split(".")
+        if len(parts) != 3:
+            return None
+        payload = parts[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        auth_claims = claims.get("https://api.openai.com/auth")
+        account_id = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
+        sub = claims.get("sub")
+        if isinstance(account_id, str) and account_id.strip() and isinstance(sub, str) and sub.strip():
+            return account_id.strip(), sub.strip()
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        pass
+    return None
 
 
 def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Path:
@@ -235,68 +281,135 @@ def _invalidate_provider_state_caches(provider: str) -> None:
         logger.debug("Failed to invalidate providers cache after %s credential change", provider, exc_info=True)
 
 
-def _persist_codex_credentials(hermes_home: Path, token_data: dict[str, Any]) -> Path:
-    """Persist Codex OAuth credentials to active-profile auth.json."""
+def _codex_login_state(auth_path: Path, auth: dict[str, Any]) -> dict[str, Any]:
+    """Private prior-pair snapshot; absence is an explicit expected state."""
+    providers = auth.get("providers", {})
+    if not isinstance(providers, dict):
+        raise RuntimeError("Refusing to write invalid providers store")
+    rows = {}
+    for entry in auth.get("credential_pool", {}).get("openai-codex", []):
+        identity = _principal_identity(entry.get("access_token")) if isinstance(entry, dict) else None
+        if identity is None:
+            raise RuntimeError("Refusing to write Codex pool with unidentified existing principal")
+        if identity in rows:
+            raise RuntimeError("Refusing to write Codex pool with duplicate principal")
+        rows[identity] = (entry.get("id"), entry.get("access_token"), entry.get("refresh_token"))
+    singleton = None
+    if "openai-codex" in providers:
+        legacy = providers["openai-codex"]
+        tokens = legacy.get("tokens") if isinstance(legacy, dict) else None
+        identity = _principal_identity(tokens.get("access_token")) if isinstance(tokens, dict) else None
+        if identity is None or not isinstance(tokens, dict):
+            raise RuntimeError("Refusing Codex login with unidentified legacy singleton")
+        singleton = (identity, tokens.get("access_token"), tokens.get("refresh_token"))
+    return {"auth_path": str(auth_path.resolve()), "rows": rows, "singleton": singleton}
+
+
+def _capture_codex_login_state(hermes_home: Path) -> dict[str, Any]:
+    """Capture before device-code/network work, without holding a lock over OAuth."""
+    from hermes_cli.auth import _auth_store_lock
+
+    auth_path = get_shared_auth_path(hermes_home)
+    with _auth_store_lock(target_path=auth_path):
+        return _codex_login_state(auth_path, _read_auth_json_strict(auth_path))
+
+
+def _persist_codex_credentials(
+    hermes_home: Path, token_data: dict[str, Any], *, expected_state: dict[str, Any] | None = None,
+) -> Path:
+    """Save the exact principal; validate a supplied pre-network prior-state CAS.
+
+    The operational device-login worker always supplies expected_state. The
+    snapshot-less form is a legacy persistence/test seam, not a login initiator;
+    any caller performing an exchange must capture state before network work.
+    """
+    from hermes_cli.auth import _auth_store_lock, _save_auth_store
+
     access_token = str(token_data.get("access_token") or "").strip()
     refresh_token = str(token_data.get("refresh_token") or "").strip()
     if not access_token:
         raise RuntimeError("Codex token exchange did not return an access_token")
 
-    auth_path = Path(hermes_home) / "auth.json"
-    auth = _read_auth_json(auth_path)
-    auth.setdefault("version", 1)
-    pool = auth.setdefault("credential_pool", {})
-    if not isinstance(pool, dict):
-        pool = {}
-        auth["credential_pool"] = pool
-    entries = pool.setdefault("openai-codex", [])
-    if not isinstance(entries, list):
-        entries = []
-        pool["openai-codex"] = entries
-
-    now = _now_iso()
-    entry = None
-    # Per Opus advisor on stage-296: also accept the legacy `source ==
-    # "oauth_device"` value so users with prior Codex OAuth credentials
-    # (written by older WebUI versions before this PR's source-key change)
-    # get their existing entry updated in-place rather than accumulating a
-    # stale duplicate pool entry.
-    _accept_sources = {"manual:device_code", "oauth_device"}
-    for candidate in entries:
-        if isinstance(candidate, dict) and candidate.get("source") in _accept_sources:
-            entry = candidate
-            break
-    if entry is None:
-        entry = {
-            "id": "codex-oauth-" + uuid.uuid4().hex[:12],
-            "label": "Codex OAuth",
-            "auth_type": "oauth",
-            "priority": 0,
-            "source": "manual:device_code",
-            "base_url": CODEX_BASE_URL,
-            "created_at": now,
-        }
-        entries.insert(0, entry)
-
-    entry.update(
-        {
-            "label": "Codex OAuth",
-            "auth_type": "oauth",
-            "priority": 0,
+    auth_path = get_shared_auth_path(hermes_home)
+    shared_mode = bool(os.environ.get("HERMES_AUTH_HOME", "").strip())
+    new_identity = _principal_identity(access_token)
+    if expected_state is not None:
+        if expected_state.get("auth_path") != str(auth_path.resolve()):
+            raise RuntimeError("Codex login auth root changed; start login again")
+        if new_identity is None:
+            raise RuntimeError("Codex login requires an identifiable account for prior-state validation")
+    with _auth_store_lock(target_path=auth_path):
+        # Read only after acquiring the same auth.lock used by CLI/refresh.
+        auth = _read_auth_json_strict(auth_path)
+        providers = auth.get("providers", {})
+        if not isinstance(providers, dict):
+            raise RuntimeError("Refusing to write invalid providers store")
+        has_singleton = "openai-codex" in providers
+        if has_singleton:
+            singleton = providers["openai-codex"]
+            tokens = singleton.get("tokens") if isinstance(singleton, dict) else None
+            singleton_identity = _principal_identity(tokens.get("access_token")) if isinstance(tokens, dict) else None
+            if new_identity is None or singleton_identity != new_identity:
+                # Preserving an unrelated/unknown singleton can seed a duplicate
+                # device_code row or overwrite another principal on core select.
+                raise RuntimeError("Refusing Codex login with unrelated or unidentified legacy singleton")
+        pool = auth.setdefault("credential_pool", {})
+        entries = pool.setdefault("openai-codex", [])
+        identities = []
+        for candidate in entries:
+            identity = _principal_identity(candidate.get("access_token")) if isinstance(candidate, dict) else None
+            if identity is None:
+                raise RuntimeError("Refusing to write Codex pool with unidentified existing principal")
+            identities.append(identity)
+        if len(set(identities)) != len(identities):
+            raise RuntimeError("Refusing to write Codex pool with duplicate principal")
+        if new_identity is None and (entries or shared_mode):
+            raise RuntimeError("Codex login requires an identifiable account for an existing or shared pool")
+        entry = entries[identities.index(new_identity)] if new_identity in identities else None
+        if expected_state is not None:
+            current_state = _codex_login_state(auth_path, auth)
+            if (current_state["rows"].get(new_identity) != expected_state["rows"].get(new_identity)
+                    or current_state["singleton"] != expected_state["singleton"]):
+                raise RuntimeError("Codex login prior credentials changed; start login again")
+        now = _now_iso()
+        if entry is None:
+            entry = {
+                "id": "codex-oauth-" + uuid.uuid4().hex[:12],
+                "label": "Codex OAuth",
+                "auth_type": "oauth",
+                "priority": max((e.get("priority", 0) for e in entries), default=-1) + 1,
+                "source": "manual:device_code",
+                "base_url": CODEX_BASE_URL,
+                "created_at": now,
+            }
+            entries.append(entry)
+        # Detach legacy rows from singleton sync; retain ordering and cooldowns.
+        entry.update({
             "source": "manual:device_code",
             "access_token": access_token,
             "refresh_token": refresh_token,
             "base_url": CODEX_BASE_URL,
             "last_refresh": now,
             "updated_at": now,
-        }
-    )
-    auth["updated_at"] = now
-    path = _write_auth_json(auth, auth_path)
+        })
+        # A fresh deliberate grant repairs only terminal authentication death,
+        # never genuine quota/exhaustion state or a peer's quarantine.
+        if entry.get("last_status") == "dead" and str(entry.get("last_error_code")) != "429":
+            from agent.credential_pool import _TERMINAL_AUTH_REASONS
+
+            if (str(entry.get("last_error_code")) == "401"
+                    or entry.get("last_error_reason") in _TERMINAL_AUTH_REASONS):
+                entry.update({"last_status": "ok", "last_status_at": None,
+                              "last_error_code": None, "last_error_reason": None,
+                              "last_error_message": None, "last_error_reset_at": None})
+        if has_singleton:
+            # Only remove the positively matched legacy shadow, never an account.
+            del providers["openai-codex"]
+        _save_auth_store(auth, target_path=auth_path)
 
     _invalidate_provider_state_caches("openai-codex")
 
-    return path
+    return auth_path
 
 
 # Backward-compatible wrapper used by older code/tests.
@@ -634,6 +747,7 @@ def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
         "access_token",
         "refresh_token",
         "token_data",
+        "login_state",
     ):
         flow.pop(key, None)
 
@@ -710,7 +824,8 @@ def _run_codex_oauth_worker(flow_id: str) -> None:
                 current = _OAUTH_FLOWS.get(flow_id)
                 if not current or current.get("status") != "pending":
                     return
-            _persist_codex_credentials(Path(live["hermes_home"]), tokens)
+            _persist_codex_credentials(Path(live["hermes_home"]), tokens,
+                                       expected_state=live["login_state"])
             _set_flow_status(flow_id, "success")
             return
         except Exception as exc:
@@ -792,6 +907,7 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
                 flow_id, flow = existing
                 return _public_start_payload(flow_id, flow)
 
+        login_state = _capture_codex_login_state(hermes_home)
         try:
             device = _request_codex_user_code()
         except Exception as exc:
@@ -810,6 +926,7 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
             "provider": "openai-codex",
             "status": "pending",
             "device_auth_id": device_auth_id,
+            "login_state": login_state,
             "user_code": user_code,
             "expires_at": expires_at,
             "poll_interval_seconds": interval,

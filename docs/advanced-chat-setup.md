@@ -2,6 +2,8 @@
 
 Two optional features for self-hosted Hermes WebUI deployments. **Most users need neither** — the defaults (in-process chat, no prefill) work out of the box.
 
+This page documents the upstream recall-prefill and single-Gateway chat controls. For remote profile proxies, service-authorized session launch, selector ordering, and the fork-specific safety contracts, see [Deployment extensions in this fork](fork-runtime-extensions.md).
+
 ## Session recall prefill
 
 WebUI can attach ephemeral prefill messages to new browser-originated

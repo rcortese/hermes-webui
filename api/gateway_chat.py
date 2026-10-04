@@ -169,6 +169,10 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+
+
+from api.profile_proxy import resolve_execution_target
+from api.http import credentialed_urlopen as _gateway_urlopen
 # Backend tag of the in-process WebUI runtime. Local workers register their
 # active run with it; cache-only Steer only enqueues on this explicit value.
 WEBUI_LOCAL_CHAT_BACKEND = "legacy"
@@ -291,6 +295,8 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     ).strip().lower()
     if raw in _GATEWAY_CHAT_BACKENDS:
         return "gateway"
+    # Keep the runtime ownership tag used by local Steer/cancellation. The
+    # execution-target resolver separately exposes the local-direct target.
     return WEBUI_LOCAL_CHAT_BACKEND
 
 
@@ -484,15 +490,61 @@ def _gateway_sse_reasoning_delta(payload: dict) -> str:
         return ""
 
 
-def _gateway_stream_usage(payload: dict) -> dict:
+def _gateway_resolve_context_length(model: str | None, provider: str | None, *, base_url: str = "", api_key: str = "") -> int:
+    """Resolve a real context window for Gateway-backed Chat Completions usage."""
+    try:
+        from api.routes import _resolve_context_length_for_session_model
+
+        return int(_resolve_context_length_for_session_model(
+            model,
+            provider,
+            base_url=base_url,
+            api_key=api_key,
+        ) or 0)
+    except Exception:
+        logger.debug("Failed to resolve gateway context length", exc_info=True)
+        return 0
+
+
+def _gateway_stream_usage(payload: dict, *, context_length: int | None = None) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
-        "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    normalized = {
+        "input_tokens": input_tokens,
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    # Preserve Hermes-native context metadata when the gateway includes it. For
+    # the OpenAI-compatible chat/completions bridge, prompt_tokens is the prompt
+    # occupancy for this request, so it is the correct last_prompt_tokens value
+    # when the gateway does not emit Hermes-native metadata separately.
+    if usage.get("last_prompt_tokens") is not None:
+        normalized["last_prompt_tokens"] = usage.get("last_prompt_tokens")
+    elif input_tokens > 0:
+        normalized["last_prompt_tokens"] = input_tokens
+
+    resolved_context_length = context_length
+    if usage.get("context_length") is not None:
+        resolved_context_length = usage.get("context_length")
+    try:
+        resolved_context_length = int(resolved_context_length or 0)
+    except (TypeError, ValueError):
+        resolved_context_length = 0
+    if resolved_context_length > 0:
+        normalized["context_length"] = resolved_context_length
+
+    for key in (
+        "threshold_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_hit_percent",
+        "turn_cache_hit_percent",
+    ):
+        if usage.get(key) is not None:
+            normalized[key] = usage.get(key)
+    return normalized
 
 
 def _gateway_reasoning_delta(payload: dict) -> str:
@@ -553,7 +605,7 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
-    raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    raw_approval_id = str(payload.get("request_id") or payload.get("approval_id") or payload.get("id") or "").strip()
     approval_id = raw_approval_id
     if not approval_id:
         approval_id = uuid.uuid4().hex
@@ -582,7 +634,7 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
 
 def _gateway_approval_key(payload) -> str:
     """Stable id for one gateway approval, shared by the status probe and the event relay."""
-    return str(payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "")
+    return str(payload.get("request_id") or payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "").strip()
 
 
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> None:
@@ -639,13 +691,14 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1):
         headers=headers_sse,
         method="GET",
     )
-    return urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs())
+    return _gateway_urlopen(req, timeout=_gateway_read_timeout_secs())
 
 
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
     *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
     surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
+    context_length=None,
 ):
     """Relay one /v1/runs/{id}/events stream; returns (text or None if cancelled, usage, outcome).
 
@@ -752,7 +805,7 @@ def _relay_gateway_run_events(
                 final_text = output
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] = output
-            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=context_length).items() if v})
             outcome = "ended"
             commit()
             sse_event = "message"
@@ -785,22 +838,27 @@ def _relay_gateway_run_events(
             if stream_id in STREAM_PARTIAL_TEXT:
                 STREAM_PARTIAL_TEXT[stream_id] += delta
             emit("token", {"text": delta})
-        usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+        usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=context_length).items() if v})
         commit()
     commit()
     return final_text, usage, outcome
 
 
-def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
+def _admit_gateway_run(url_runs, headers, run_body, stream_id, *, memory_admission=None) -> str:
     """POST /v1/runs; the same stream and body return the originally admitted run id."""
+    wire_body = json.dumps(run_body).encode("utf-8")
+    from api.memory_gate import request_headers
+    headers = request_headers(
+        headers, memory_admission, wire_body, str(run_body.get("session_id") or ""),
+    )
     req = urllib.request.Request(
         url_runs,
-        data=json.dumps(run_body).encode("utf-8"),
+        data=wire_body,
         # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
         headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _gateway_urlopen(req, timeout=30) as resp:
         run_data = json.loads(resp.read(65536))
     run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
     if not run_id:
@@ -827,8 +885,12 @@ def _run_gateway_runs_api_streaming(
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
     on_run_id=None,
+    memory_admission=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
+    known_context_length = _gateway_resolve_context_length(
+        model, body_extras.get("provider"), base_url=base_url, api_key=api_key,
+    )
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
         headers = _gateway_run_headers(session_id, api_key)
@@ -888,7 +950,7 @@ def _run_gateway_runs_api_streaming(
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
             on_run_id("", request=run_body)
-        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
+        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id, memory_admission=memory_admission)
     except Exception:
         _finish_gateway_run_starting(stream_id)
         raise
@@ -901,6 +963,7 @@ def _run_gateway_runs_api_streaming(
         final_text, usage, _outcome = _relay_gateway_run_events(
             resp, session_id, stream_id, run_id, base_url, api_key,
             put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+            context_length=known_context_length,
         )
     return final_text, usage
 
@@ -968,7 +1031,7 @@ def _get_gateway_run_status(base_url: str, api_key: str, run_id: str) -> dict:
         headers=headers,
         method="GET",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _gateway_urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read(1024 * 1024) or b"{}")
     return payload if isinstance(payload, dict) else {}
 
@@ -1147,6 +1210,18 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     """URL and key of the session's own profile, root included, never the process-active profile."""
     from api import profiles as _profiles
     from api.config import get_config_for_profile_home
+
+    from api.config import get_config
+    from api.profile_proxy import profile_proxy_for
+    proxy = profile_proxy_for(profile_name, get_config())
+    if proxy:
+        target = resolve_execution_target(
+            profile_name, local_gateway_enabled=False, config_data=get_config(),
+            profiles=_profiles.list_profiles_api(include_remote=False),
+        )
+        if not target.get("ok"):
+            raise ValueError(target["error"])
+        return proxy["base_url"], proxy["api_key"]
 
     home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
     environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
@@ -1327,6 +1402,8 @@ def _run_gateway_chat_streaming(
     regeneration=False,
     reattach_run=None,
     reattach_endpoint=None,
+    gateway_config=None,
+    memory_admission=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1413,7 +1490,16 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        selected_gateway = gateway_config if isinstance(gateway_config, dict) else None
+        base_url, api_key = reattach_endpoint or (
+            (selected_gateway["base_url"], str(selected_gateway.get("api_key") or ""))
+            if selected_gateway is not None else (_gateway_base_url(cfg), _gateway_api_key())
+        )
+        session_key_prefix = str((selected_gateway or {}).get("session_key_prefix") or "webui")
+        remote_profile = str((selected_gateway or {}).get("remote_profile") or "")
+        known_context_length = _gateway_resolve_context_length(
+            model, model_provider, base_url=base_url, api_key=api_key,
+        )
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -1480,6 +1566,8 @@ def _run_gateway_chat_streaming(
                 session_id, stream_id, run_id, request=request,
                 regeneration=bool(regeneration), goal_related=bool(goal_related),
             )
+            if remote_profile:
+                body_extras["profile"] = remote_profile
             try:
                 if reattach_run:
                     run_id = str(reattach_run.get("run_id") or "").strip()
@@ -1507,6 +1595,7 @@ def _run_gateway_chat_streaming(
                         session=s,
                         active_provider=(model_provider or ""),
                         on_run_id=record_run,
+                        memory_admission=memory_admission,
                     )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -1555,7 +1644,7 @@ def _run_gateway_chat_streaming(
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers["X-Hermes-Session-Key"] = f"{session_key_prefix}:{session_id}"
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:
@@ -1576,6 +1665,8 @@ def _run_gateway_chat_streaming(
                 body["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
+            if remote_profile:
+                body["profile"] = remote_profile
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
@@ -1585,7 +1676,7 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+            with _gateway_urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -1682,8 +1773,8 @@ def _run_gateway_chat_streaming(
                         if stream_id in STREAM_PARTIAL_TEXT:
                             STREAM_PARTIAL_TEXT[stream_id] += delta
                         put_gateway_event("token", {"text": delta})
-                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-            usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+                    usage.update({k: v for k, v in _gateway_stream_usage(payload, context_length=known_context_length).items() if v})
+            usage.update({k: v for k, v in _gateway_stream_usage(last_payload, context_length=known_context_length).items() if v})
         assistant_text = final_text.strip()
         if terminal_error:
             error_payload = _settle_gateway_terminal_error(

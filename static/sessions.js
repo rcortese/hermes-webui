@@ -4787,7 +4787,7 @@ function _appRootPath(){
   }catch(_e){return '/';}
 }
 function _sessionUrlForSid(sid){
-  const encoded=encodeURIComponent(sid);
+  const encoded=_sessionMarkdownUrlSid(sid);
   let base;
   try{base=new URL(`session/${encoded}`, document.baseURI||window.location.origin+'/');}
   catch(_e){base=new URL(`/session/${encoded}`, window.location.origin);}
@@ -5064,16 +5064,24 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
   return opt;
 }
 
+function _sessionMarkdownTitle(session){
+  const title=String((session&&(session.title||session.name))||'Conversation')
+    .replace(/[\u0000-\u001F\u007F]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim()||'Conversation';
+  return title.replace(/&/g,'&amp;').replace(/([\\`*_{}\[\]()#+\-.!<>|~])/g,'\\$1');
+}
+
 function _sessionMarkdownLabel(session){
   const sid=session&&session.session_id?String(session.session_id):'';
-  const title=String((session&&(session.title||session.name))||'Conversation').replace(/\s+/g,' ').trim()||'Conversation';
+  const title=_sessionMarkdownTitle(session);
   const shortSid=sid?sid.slice(0,12):'';
   const label=shortSid?`${title} (${shortSid})`:title;
-  return label.replace(/([\\\[\]])/g,'\\$1').slice(0,120);
+  return label.slice(0,120);
 }
 
 function _sessionMarkdownUrlSid(sid){
-  return encodeURIComponent(String(sid||'')).replace(/[()]/g, ch => ch==='('?'%28':'%29');
+  return encodeURIComponent(String(sid||'')).replace(/[!'()*]/g, ch => '%'+ch.charCodeAt(0).toString(16).toUpperCase());
 }
 
 function _sessionInternalReferenceForSession(session){
@@ -5082,10 +5090,32 @@ function _sessionInternalReferenceForSession(session){
   return `[${_sessionMarkdownLabel(session)}](session://${_sessionMarkdownUrlSid(sid)})`;
 }
 
+function _sessionProfileForReference(session){
+  const profile=session&&typeof session.profile==='string'?session.profile.trim():'';
+  if(profile) return profile;
+  const active=typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'?S.activeProfile.trim():'';
+  return active||'default';
+}
+
+function _sessionCopyLinkText(session){
+  const sid=session&&session.session_id?String(session.session_id):'';
+  if(!sid) return '';
+  const profile=_sessionProfileForReference(session);
+  const locator=`@session:${_sessionMarkdownUrlSid(profile)}/${_sessionMarkdownUrlSid(sid)}`;
+  const path=new URL(_sessionUrlForSid(sid),window.location.origin);
+  path.search='';
+  path.hash='';
+  // One compact line: a clickable title for people and a distinct locator
+  // for agent/session lookup. Neither is an instruction or a public share.
+  return `[${_sessionMarkdownTitle(session)}](${path.href}) · \`${locator}\``;
+}
+
 async function _copyTextToClipboard(text){
   if(navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
-    await navigator.clipboard.writeText(text);
-    return true;
+    try{
+      await navigator.clipboard.writeText(text);
+      return true;
+    }catch(_err){}
   }
   const ta=document.createElement('textarea');
   ta.value=text;
@@ -5094,17 +5124,21 @@ async function _copyTextToClipboard(text){
   ta.style.left='-9999px';
   ta.style.top='0';
   document.body.appendChild(ta);
-  ta.select();
-  try{return document.execCommand('copy');}
+  try{
+    ta.select();
+    const copied=document.execCommand('copy');
+    if(!copied) throw new Error('Clipboard copy was not completed');
+    return true;
+  }
   finally{ta.remove();}
 }
 
 async function _copySessionLink(session){
-  const sid=session&&session.session_id;
-  if(!sid) return;
-  const ref=(window.location.origin||'')+_sessionUrlForSid(sid);
   try{
-    await _copyTextToClipboard(ref);
+    const ref=_sessionCopyLinkText(session);
+    if(!ref) return;
+    const copied=await _copyTextToClipboard(ref);
+    if(!copied) throw new Error('Clipboard copy was not completed');
     showToast(t('session_link_copied'));
   }catch(err){
     showToast(t('session_link_copy_failed')+(err&&err.message?err.message:err));
@@ -7098,6 +7132,9 @@ function _sessionSearchSessionIdCandidates(query){
 
   const sessionSchemeRe=/session:\/\/([^\s)>\]]+)/gi;
   while((match=sessionSchemeRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[1]);
+
+  const sessionLocatorRe=/@session:[^/\s`]+\/([^\s)\]>`]+)/gi;
+  while((match=sessionLocatorRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[1]);
 
   const urlRe=/(?:https?:\/\/[^\s<>\]]+|\/session\/[^\s<>\]]+|\?[^\s<>\]]+)/gi;
   while((match=urlRe.exec(source))) inspectUrl(match[0]);
