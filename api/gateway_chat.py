@@ -643,6 +643,8 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return
     approval_data["run_id"] = run_id
+    from api.route_approvals import _REMOTE_RUN_FLAG
+    approval_data[_REMOTE_RUN_FLAG] = True
     from api.config import gateway_supports_approval_identity_v1
     identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
     approval_data["_gateway_agent_identity_v1"] = identity_v1
@@ -713,6 +715,8 @@ def _relay_gateway_run_events(
     """
     usage: dict = {}
     outcome = "eof"
+    if surfaced_approval_ids is None:
+        surfaced_approval_ids = set()
     seq = None
     sse_event = "message"
 
@@ -767,6 +771,15 @@ def _relay_gateway_run_events(
                     session_id, run_id, payload, base_url, api_key,
                     put_gateway_event=emit,
                 )
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event == "approval.responded":
+            from api.route_approvals import resolve_remote_pending
+            approval_key = _gateway_approval_key(payload)
+            if approval_key:
+                surfaced_approval_ids.add(approval_key)
+                resolve_remote_pending(session_id, run_id, approval_key)
             commit()
             sse_event = "message"
             continue
@@ -959,12 +972,24 @@ def _run_gateway_runs_api_streaming(
     if on_run_id is not None:
         on_run_id(run_id)
 
-    with _open_gateway_run_events(base_url, headers, run_id) as resp:
-        final_text, usage, _outcome = _relay_gateway_run_events(
-            resp, session_id, stream_id, run_id, base_url, api_key,
-            put_gateway_event=put_gateway_event, cancel_event=cancel_event,
-            context_length=known_context_length,
-        )
+    from api.route_approvals import remote_approval_run
+    # EOF alone is not run termination: preserve current reconnect ownership.
+    # Terminal events settle in the relay; errors and explicit cancellation
+    # fail-close this fresh stream's pending cards without touching siblings.
+    try:
+        with remote_approval_run(session_id, run_id, cleanup=False), _open_gateway_run_events(base_url, headers, run_id) as resp:
+            final_text, usage, _outcome = _relay_gateway_run_events(
+                resp, session_id, stream_id, run_id, base_url, api_key,
+                put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+                context_length=known_context_length,
+            )
+    except Exception:
+        from api.route_approvals import settle_gateway_pending_run
+        settle_gateway_pending_run(session_id, run_id, reason="Remote stream failed")
+        raise
+    if cancel_event.is_set():
+        from api.route_approvals import settle_gateway_pending_run
+        settle_gateway_pending_run(session_id, run_id, reason="Remote stream cancelled")
     return final_text, usage
 
 

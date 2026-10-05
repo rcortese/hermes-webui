@@ -69,6 +69,34 @@ _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
+_REMOTE_RUN_FLAG = "_remote_run"
+_remote_approval_runs: dict[tuple[str, str], set[str]] = {}
+
+
+@contextmanager
+def remote_approval_run(session_key: str, run_id: str, *, cleanup=True):
+    """Track replay identity for a fresh remote stream, without local waiters."""
+    with _lock:
+        _remote_approval_runs[(session_key, run_id)] = set()
+    try:
+        yield
+    finally:
+        try:
+            if cleanup:
+                settle_gateway_pending_run(session_key, run_id, reason="Remote stream ended")
+        finally:
+            with _lock:
+                _remote_approval_runs.pop((session_key, run_id), None)
+
+
+def resolve_remote_pending(session_key: str, run_id: str, approval_id: str) -> None:
+    """Record an accepted remote identity and retire only its polling card."""
+    with _lock:
+        seen = _remote_approval_runs.get((session_key, run_id))
+        if seen is not None:
+            seen.add(approval_id)
+    retire_gateway_pending_mirror(session_key, approval_id=approval_id, run_id=run_id)
+
 _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
 _gateway_yolo_handoff_guard = threading.Lock()
@@ -677,6 +705,13 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
     with _lock:
         run_id = str(approval.get("run_id") or "").strip()
         approval_id = str(approval.get("approval_id") or "").strip()
+        if approval.get(_REMOTE_RUN_FLAG):
+            seen = _remote_approval_runs.get((session_key, run_id))
+            if seen is not None:
+                if approval_id in seen:
+                    head, total, _ = reconcile_gateway_pending_mirror_locked(session_key)
+                    return head, total
+                seen.add(approval_id)
         live_gateway_queue = _gateway_queues.get(session_key) or []
         exact_local_entry = next(
             (

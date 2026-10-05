@@ -28216,6 +28216,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     found_target = False
     gateway_keys = []
     local_gateway_approval_id = ""
+    from api.route_approvals import _REMOTE_RUN_FLAG
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
@@ -28237,6 +28238,8 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                         fallback_index = i
                 match_index = preferred_index if preferred_index is not None else fallback_index
                 if match_index is not None:
+                    if queue[match_index].get(_REMOTE_RUN_FLAG):
+                        return False
                     pending = queue.pop(match_index)
                     found_target = True
                 else:
@@ -28245,6 +28248,8 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     # bounded as not-active by the adapter route.
                     pending = None
             else:
+                if queue and queue[0].get(_REMOTE_RUN_FLAG):
+                    return False
                 pending = queue.pop(0) if queue else None
                 found_target = pending is not None
             if not queue:
@@ -28258,6 +28263,8 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     and (not run_id or str(queue.get("run_id") or "").strip() == run_id)
                 )
             ):
+                if queue.get(_REMOTE_RUN_FLAG):
+                    return False
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
         # When no _pending entry found AND no explicit approval_id was
@@ -28470,11 +28477,19 @@ def _relay_gateway_run_approval(
         relay_error = None
         relay_succeeded = False
         try:
-            HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
+            result = HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
                 run_id,
                 approval_id if identity_v1 else "",
                 choice,
             )
+            from api.route_approvals import _REMOTE_RUN_FLAG
+            if current_mirror.get(_REMOTE_RUN_FLAG) and (
+                not isinstance(result, dict)
+                or result.get("ok") is False or result.get("accepted") is False
+                or not (result.get("ok") is True or result.get("accepted") is True
+                        or (type(result.get("resolved")) is int and result["resolved"] > 0))
+            ):
+                raise RunnerClientError("Gateway approval response not accepted")
             relay_succeeded = True
         except (RunnerClientError, ValueError) as exc:
             relay_error = str(exc)
@@ -28494,7 +28509,11 @@ def _relay_gateway_run_approval(
 
         # The outbound relay resumes the remote run. Retire the local projection
         # only after that succeeds, then settle any matching in-process mirror.
-        _resolve_approval_legacy(sid, approval_id, choice, run_id=run_id)
+        from api.route_approvals import _REMOTE_RUN_FLAG, resolve_remote_pending
+        if current_mirror.get(_REMOTE_RUN_FLAG):
+            resolve_remote_pending(sid, run_id, approval_id)
+        else:
+            _resolve_approval_legacy(sid, approval_id, choice, run_id=run_id)
         retire_gateway_pending_mirror(
             sid,
             approval_id=approval_id,

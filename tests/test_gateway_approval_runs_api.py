@@ -723,7 +723,7 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
             browser_id = mirror["approval_id"]
             with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
                  patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
-                 patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+                 patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
                 routes._handle_approval_respond(handler, {
                     "session_id": sid, "choice": "once", "approval_id": browser_id,
                 })
@@ -803,7 +803,7 @@ def test_live_authoritative_ingress_id_relays_exactly_under_capability_v1():
             )
             with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
                  patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
-                 patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+                 patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
                 routes._handle_approval_respond(handler, {
                     "session_id": sid, "choice": "once", "approval_id": "agent-approval-1",
                 })
@@ -882,7 +882,7 @@ def test_gateway_runs_api_streaming_same_run_fifo_emits_head_and_promotes_succes
         handler = MagicMock()
         handler.wfile = io.BytesIO()
         with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
-             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+             patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond_approval:
             routes._handle_approval_respond(handler, {
                 "session_id": sid,
                 "choice": "deny",
@@ -3176,7 +3176,7 @@ def test_synthetic_gateway_identity_stays_fifo_after_capability_upgrade():
     handler.wfile = io.BytesIO()
     with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id="sid-upgrade")), \
          patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
-         patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+         patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
         routes._handle_approval_respond(handler, {
             "session_id": "sess-upgrade", "choice": "once", "approval_id": "gwrun:run-upgrade:local",
         })
@@ -3202,7 +3202,7 @@ def test_agent_identity_v1_relays_the_ingress_identity_exactly():
     handler.wfile = io.BytesIO()
     with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id="sid-v1")), \
          patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
-         patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+         patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
         routes._handle_approval_respond(handler, {
             "session_id": "sess-v1", "choice": "once", "approval_id": "agent-v1",
         })
@@ -3229,7 +3229,7 @@ def test_capability_v1_empty_ingress_identity_stays_fifo_only():
     handler.wfile = io.BytesIO()
     with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id="sid-v1-empty")), \
          patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
-         patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+         patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
         routes._handle_approval_respond(handler, {
             "session_id": "sess-v1-empty", "choice": "once", "approval_id": mirror["approval_id"],
         })
@@ -3628,7 +3628,7 @@ def test_identityless_gateway_relay_revalidates_head_after_claim_and_releases_ow
              patch("api.gateway_chat._gateway_api_key", return_value=""), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=False), \
              patch("api.routes.gateway_pending_mirror", side_effect=advance_head_after_claim), \
-             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+             patch("api.runner_client.HttpRunnerClient.respond_approval", return_value={"ok": True}) as respond:
             results = {}
             _invoke_gateway_approval_response(
                 results,
