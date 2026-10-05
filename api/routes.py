@@ -24717,7 +24717,18 @@ def _moss_gateway_memory_admission(execution_target, source, goal_related):
     if execution_target.get("execution_target") != "local_gateway" or source != "webui" or goal_related:
         return None
     from api.memory_gate import current_admission
-    return current_admission()
+    admission = current_admission()
+    gateway = execution_target.get("gateway_config") or {}
+    # The single-home Moss gateway resolves its unprefixed Runs route as
+    # default. Alias only this authorized local transport; browser authorization
+    # remains Moss, and the original ContextVar admission is never mutated.
+    if (admission and admission.get("profile") == "moss"
+            and os.environ.get("AGENT_NAME") == "moss"
+            and gateway.get("base_url", "").rstrip("/") == "http://moss:8648"
+            and not gateway.get("remote_profile")
+            and gateway.get("session_key_prefix") == "webui"):
+        return {**admission, "profile": "default"}
+    return admission
 
 
 def _start_chat_stream_for_session(
