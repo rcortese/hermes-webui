@@ -62,6 +62,48 @@ def _make_jpeg(path: Path, size: int = 107) -> Path:
 
 # ── _attachment_name ────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize('mode', ['native', 'text'])
+@pytest.mark.parametrize('mime,name', [('application/pdf', 'brief.pdf'), ('text/plain', 'notes.txt')])
+def test_non_image_upload_is_validated_local_reference(tmp_path, monkeypatch, mode, mime, name):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    inbox = tmp_path / 'inbox'
+    inbox.mkdir()
+    monkeypatch.setattr('api.upload._attachment_root', lambda: inbox)
+    doc = workspace / name
+    doc.write_bytes(b'file contents')
+    result = _build_native_multimodal_message('[WS]\n', 'read',
+        [{'path': str(doc), 'mime': mime}], str(workspace), cfg={'agent': {'image_input_mode': mode}})
+    assert result == f'[WS]\nread\n\n[Attached file available locally ({mime}): {doc.resolve()}]'
+    uploaded = inbox / name
+    uploaded.write_bytes(b'file contents')
+    result = _build_native_multimodal_message('', 'read', [{'path': str(uploaded), 'mime': mime}], str(workspace), cfg={'agent': {'image_input_mode': mode}})
+    assert str(uploaded.resolve()) in result
+
+
+@pytest.mark.parametrize('mode', ['native', 'text'])
+def test_non_image_outside_and_symlink_escape_not_referenced(tmp_path, monkeypatch, mode):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    inbox = tmp_path / 'inbox'
+    inbox.mkdir()
+    monkeypatch.setattr('api.upload._attachment_root', lambda: inbox)
+    outside = tmp_path / 'secret.pdf'
+    outside.write_bytes(b'%PDF-1.7\n')
+    escape = workspace / 'escape.pdf'
+    escape.symlink_to(outside)
+    attachments = [{'path': str(path), 'mime': 'application/pdf'} for path in (outside, escape)]
+    attachments += [{'path': ''}, {'path': str(workspace / 'missing.pdf')}, None]
+    assert _build_native_multimodal_message('', 'read', attachments, str(workspace), cfg={'agent': {'image_input_mode': mode}}) == 'read'
+
+
+def test_non_image_reference_not_subject_to_image_size_limit(tmp_path, monkeypatch):
+    doc = tmp_path / 'large.pdf'
+    doc.write_bytes(b'not embedded')
+    monkeypatch.setattr('api.streaming._NATIVE_IMAGE_MAX_BYTES', 1)
+    result = _build_native_multimodal_message('', 'read', [{'path': str(doc), 'mime': 'application/pdf'}], str(tmp_path))
+    assert str(doc.resolve()) in result
+
 class TestAttachmentName:
     def test_dict_with_name(self):
         assert _attachment_name({'name': 'photo.png', 'path': '/tmp/x'}) == 'photo.png'

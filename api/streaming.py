@@ -4010,8 +4010,8 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
 
     WebUI uploads files into the active workspace. For image files, pass the
     bytes to Hermes as OpenAI-style image_url data URLs so vision-capable main
-    models can consume them in the same request. Non-image files intentionally
-    stay as text path attachments so the agent can inspect them with file tools.
+    models can consume them in the same request. Non-image files become validated
+    local path references so the agent can inspect them with file tools.
 
     When *cfg* is provided, respects ``agent.image_input_mode`` — if the resolved
     mode is ``"text"``, returns a plain string (attachments are not embedded) so
@@ -4020,11 +4020,12 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     if not attachments:
         return workspace_ctx + msg_text
 
+    text_content = workspace_ctx + msg_text + _attachment_text_references(attachments, workspace, profile=profile)
     # ── Check image_input_mode before embedding anything ──
     if cfg is not None and _resolve_image_input_mode(cfg, active_provider, active_model, requested_provider=requested_provider) == "text":
-        return workspace_ctx + msg_text
+        return text_content
 
-    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
+    parts = [{'type': 'text', 'text': text_content}]
     workspace_root = _resolve_path(workspace, profile=profile)
     # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
@@ -4072,7 +4073,40 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         })
         image_count += 1
 
-    return parts if image_count else workspace_ctx + msg_text
+    return parts if image_count else text_content
+
+
+def _attachment_text_references(attachments, workspace: str, *, profile=None) -> str:
+    """Reference non-image files only after resolving server-allowed roots.
+
+    No file bytes are embedded, so the native image size cap does not apply.
+    Resolve symlinks before checking containment, as the image path does.
+    """
+    workspace_root = _resolve_path(workspace, profile=profile)
+    try:
+        from api.upload import _attachment_root
+        allowed_roots = (workspace_root, _attachment_root())
+    except Exception:
+        allowed_roots = (workspace_root,)
+    references = []
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            if not any(path.is_relative_to(root) for root in allowed_roots) or not path.is_file():
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if mime.startswith('image/'):
+                continue
+            label = f" ({mime})" if mime else ""
+            references.append(f"\n\n[Attached file available locally{label}: {path}]")
+        except Exception:
+            continue
+    return ''.join(references)
 
 
 _INLINE_THINKING_TAG_PAIRS = (
